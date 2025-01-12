@@ -1,0 +1,798 @@
+`include "./config.v"
+module MAC(
+	input												clk,
+	input												rst,
+	
+	input		[13 : 0]									standard_shift,  //^^^^^^^^^^^^^^^^^^^^^
+	input		[9 : 0]									deepwise_shift,
+	input		[9 : 0]									residual_shift,
+	input												residual,
+	
+	input												kernel_1_standard_conv,
+	input												indata_load_IR3,
+
+	input												indata_load_IR4,
+	input		[1 : 0]									indata_IR4_shift_dir,
+	input												indata_IR4_shift,
+	input		[1 : 0]									indata_load_IR5,
+	
+	input												weight_load_WR1,
+	input												weight_load_WR2,
+	input												bias_load_BR1,
+	input												bias_load_BR2,
+	input												psum_load_PR1,
+	input												psum_load1_PR2,
+	input												psum_load2_PR2,
+	input												sel_DW_9,//^^^^^^^^^^^^^^
+	
+	input												shift_load_SR,
+	input		[1 : 0]									parallel_mode,
+	input		[1 : 0]									parallel_mode_DW,  //all, not DW
+	input		[2:0]									ifm_bit_DW,//^^^^^^^^^^^^^^^^
+	input		[1:0]									wts_bit_DW,
+	input		[10:0]									gamma,
+	input												outdata_psum_en,
+	input												outdata_psum_shift,
+	// input												outdata_psum_shift2,
+	input		[4:0]									outdata_psum_shift_cnt,
+	// input		[3:0]									outdata_cnt,
+	
+	input												outdata_load_OR,
+	input		[6 : 0]							 		store_en,
+	input		[15 : 0]								store_addr,
+	input												pwindata_en,
+	input		[15 : 0]								pwindata_addr,
+	// input												outdata_shift,
+	// input												outdata_CL_shift,
+	input		[2 : 0]									COL_cnt2,
+	input       [5 : 0]                                 layer,
+	input		[10 : 0]								pe_sel,
+	input		[10 : 0]								pe_sel_P1,
+	input												deepwise_conv,
+	
+	input                                               start_psum,
+	
+	
+	
+	input		[`DATA_WIDTH * `IR3_ROW *  8 - 1 : 0]	indata_CL,  //9*8*8
+	// input		[`DATA_WIDTH * `PE_ROW *  8 - 1 : 0]	indata_psum,   //8*7*8
+	input		[24 * `PE_DEP * `PE_ROW - 1 : 0]	indata_psum,   //24*7*8
+	input		[`DATA_WIDTH * `PE_DEP  *  2 - 1 : 0]	weight,
+	input		[`DATA_WIDTH * `PE_DEP  *  4 - 1 : 0]	bias,
+	input		[`DATA_WIDTH * `PE_DEP  *  2 - 1 : 0]	shift,
+	// output  reg [24 * `PE_ROW * `PE_DEP * 2 - 1 : 0]	PE_psum_outdata2_reg_reg,	
+	output	reg	[24 * `PE_ROW * `PE_DEP - 1 : 0]		outdata_CL_psum,
+	output	reg	[`DATA_WIDTH * `PE_ROW  *  8 - 1 : 0]	outdata_CL
+	
+);
+
+// wire [47:0]	PE_psum_outdata2_reg_test;
+// assign PE_psum_outdata2_reg_test = PE_psum_outdata2_reg[0];
+// wire [`DATA_WIDTH * 4 - 1 :0] BR4_test;
+// assign BR4_test = BR4[0];
+// wire [23 : 0] PR3_test;
+// assign PR3_test = PR3[0];
+// wire [`DATA_WIDTH * 2 - 1 :0] SR1_test;
+// assign SR1_test = SR1[0];
+// wire [23 : 0] PE_outdata_8_psum_test;
+// assign PE_outdata_8_psum_test = PE_outdata_8_psum[0];
+// wire [`DATA_WIDTH - 1 : 0] PE_outdata_8_test;
+// assign PE_outdata_8_test = PE_outdata_8[0];
+// wire start_psum_test ;
+// assign start_psum_test = start_psum;
+
+// wire indata_load_IR3_test;	
+// assign indata_load_IR3_test = indata_load_IR3;
+//assign indata_CL_ila = indata_CL;
+//assign weight_ila = weight;
+//assign bias_ila = bias;
+//assign shift_ila = shift;
+//assign outdata_CL_ila = outdata_CL;
+
+
+
+// PE_ila MAC_ila (
+// 	.clk(clk), // input wire clk
+
+
+// 	.probe0({
+// 	//    weight_load_WR1,
+//        indata_CL[7:0],
+//        weight[15:0],
+//        bias[31:0],
+//        shift[15:0],
+// 	   indata_psum[23:0],
+// 	   outdata_CL_psum[23:0],
+//        outdata_CL[7:0]
+// 	}) // input wire [199:0] probe0
+// );
+
+
+
+integer												i, j, k;
+reg [`DATA_WIDTH - 1 : 0]							IR3[`IR3_ROW *  `IR3_COL * `IR3_DEP - 1 : 0];//15 * 15 * 8
+reg	[`DATA_WIDTH - 1 : 0]							IR4[`IR4_ROW *  `IR4_COL * `IR4_DEP - 1 : 0];//15 * 17 * 8
+reg [`DATA_WIDTH - 1 : 0]							IR5[`IR5_ROW *  `IR5_COL * `IR5_DEP - 1 : 0];//7 * 7 * 8
+
+reg	[`DATA_WIDTH * 2 - 1 :0]						WR1[`WR1_DEP - 1 : 0];
+reg	[`DATA_WIDTH * 2 - 1 :0]						WR2[`WR2_DEP * `WR2_ROW - 1 : 0];
+reg	[`DATA_WIDTH * 2 - 1 :0]						WR3[`WR2_DEP * `WR2_ROW - 1 : 0];
+reg	[`DATA_WIDTH * 4 - 1 :0]						BR1[`WR1_DEP - 1 : 0];
+reg	[`DATA_WIDTH * 4 - 1 :0]						BR2[`WR1_DEP - 1 : 0];
+reg	[`DATA_WIDTH * 4 - 1 :0]						BR3[`WR1_DEP - 1 : 0];
+reg	[`DATA_WIDTH * 4 - 1 :0]						BR4[`WR1_DEP - 1 : 0];
+reg	[`DATA_WIDTH * 2 - 1 :0]						SR1[`BR1_DEP - 1 : 0];
+
+
+
+
+
+reg [10:0]											CR1_P1[`PE_ROW - 1 : 0];
+reg [10:0]											CR2_P1[`PE_ROW * `PE_COL - 1 : 0];
+
+
+// reg	[13:0]											shift_reg;
+// reg [13:0]											SR1[`PE_ROW - 1 : 0];
+// reg [13:0]											SR2[`PE_ROW * `PE_COL - 1 : 0];
+
+// reg	[`DATA_WIDTH - 1 : 0]							OR[`PE_ROW * `PE_COL * `PE_DEP - 1 : 0];
+// reg	[`DATA_WIDTH * `PE_ROW * `PE_DEP - 1 : 0]		OR_CL[2 * `PE_COL - 1 : 0];
+// reg	[`DATA_WIDTH * `PE_ROW * `PE_DEP - 1 : 0]		OR_CL[1:0];
+
+wire[`DATA_WIDTH - 1 : 0]							PWINDATA[`PE_ROW * `PE_COL - 1 : 0]; // 7 * 7
+wire[`DATA_WIDTH - 1 : 0]							PE_outdata_8[`PE_ROW * `PE_DEP - 1 : 0]; //7*8*4 ^^^^^^^^
+wire[23 : 0]										PE_outdata_8_psum[`PE_ROW * `PE_DEP - 1 : 0]; //7*8*4 ^^^^^^^^
+wire[53 : 0]										PE1_outdata[`PE_ROW * `PE_COL * `PE_DEP - 1 : 0];
+reg [53 : 0]										PE_psum_outdata[`PE_ROW * `PE_COL * `PE_DEP - 1 : 0];
+// reg	[23 : 0]										PR1[`PE_DEP * `PE_ROW * `PE_COL * 2 - 1 : 0]; //7*7*8*2
+reg	[23 : 0]										PR1[`PE_DEP * `PE_ROW - 1 : 0]; //7*8
+reg	[23 : 0]										PR2[`PE_DEP * `PE_ROW - 1 : 0];//7*8
+reg	[23 : 0]										PR3[`PE_DEP * `PE_ROW - 1 : 0];//7*8
+
+
+reg sel_DW_9_d1, sel_DW_9_d2, sel_DW_9_d3, sel_DW_9_d4, sel_DW_9_d5, sel_DW_9_d6;
+always @(posedge clk) begin
+	sel_DW_9_d1	<= sel_DW_9;
+	sel_DW_9_d2	<= sel_DW_9_d1;
+	sel_DW_9_d3	<= sel_DW_9_d2;
+	sel_DW_9_d4	<= sel_DW_9_d3;
+	sel_DW_9_d5	<= sel_DW_9_d4;
+	sel_DW_9_d6	<= sel_DW_9_d5;
+end
+//input register
+//****************************************************************************************************
+
+always @(posedge clk) begin
+	if(indata_load_IR3) begin
+		for(i = 0; i < `IR3_ROW; i = i + 1) begin
+			for(j = 0; j < `IR3_COL - 1; j = j + 1)
+				for(k = 0; k < `IR3_DEP; k = k + 1)
+					IR3[k * `IR3_ROW * `IR3_COL + i * `IR3_COL + j]		<= IR3[k * `IR3_ROW * `IR3_COL + i * `IR3_COL + j + 1];  //<-
+			for(k = 0; k < `IR3_DEP; k = k + 1)
+				IR3[k * `IR3_ROW * `IR3_COL + (i + 1) * `IR3_COL - 1]	<= indata_CL[(i * 8 + k + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+	end end
+	else begin
+		for(i = 0; i < `IR3_ROW * `IR3_COL * `IR3_DEP; i = i + 1)
+			IR3[i]		<= IR3[i];
+	end
+end
+
+always @(posedge clk) begin
+	if(indata_load_IR4) begin
+		for(k = 0; k < `IR4_DEP; k = k + 1)
+			for(i = 0; i < `IR4_ROW ; i = i + 1)
+				for(j = 0; j < `IR3_COL; j = j + 1)
+					// IR4[k * `IR4_ROW * `IR4_COL + (i + 2) * `IR4_COL + `IR4_LOAD_IR3_OFSET + j]	<= IR3[k * `IR3_ROW * `IR3_COL + i * `IR3_COL + j];
+					IR4[k * `IR4_ROW * `IR4_COL + i * `IR4_COL + `IR4_LOAD_IR3_OFSET + j]	<= IR3[k * `IR3_ROW * `IR3_COL + i * `IR3_COL + j];
+	end
+	else begin
+		case({indata_IR4_shift_dir, indata_IR4_shift})
+			3'b001: begin//
+				for(k = 0; k < `IR4_DEP - 1; k = k + 1)
+					for(i = 0; i < `IR4_ROW ; i = i + 1)
+						for(j = 0; j < `IR4_COL; j = j + 1)
+							IR4[k * `IR4_ROW * `IR4_COL + i * `IR4_COL + j]	<= IR4[(k + 1) * `IR4_ROW * `IR4_COL + i * `IR4_COL + j];
+			end
+			3'b010: begin//<-
+					for(i = 0; i < `IR4_ROW; i = i + 1)
+						for(j = 0; j < `IR4_COL - 1; j = j + 1)
+							IR4[ i * `IR4_COL + j]		<= IR4[ i * `IR4_COL + j + 1];
+			end
+			3'b100: begin//->
+					for(i = 0; i < `IR4_ROW; i = i + 1)
+						for(j = 0; j < `IR4_COL - 1; j = j + 1)
+							IR4[ i * `IR4_COL + j + 1]	<= IR4[ i * `IR4_COL + j];
+			end
+			3'b110: begin//^
+					for(i = 0; i < `IR4_ROW - 1; i = i + 1)
+						for(j = 0; j < `IR4_COL; j = j + 1)
+							IR4[ i * `IR4_COL + j]		<= IR4[ (i + 1) * `IR4_COL + j];
+			end
+			default: begin
+				for(i = 0; i < `IR4_ROW * `IR4_COL * `IR4_DEP; i = i + 1)
+					IR4[i]		<= IR4[i];
+			end
+		endcase
+	end
+end
+
+always @(posedge clk) begin
+	case(indata_load_IR5)
+		2'd0: begin//stride = 1, standard conv
+			for(k = 0; k < `IR5_DEP; k = k + 1)
+				for(i = 0; i < `IR5_ROW; i = i + 1)
+					for(j = 0; j < `IR5_COL; j = j + 1)
+						if(kernel_1_standard_conv)
+							IR5[k * `IR5_ROW * `IR5_COL + i * `IR5_COL + j]		<= IR4[i * `IR4_COL + j + `IR5_LOAD_IR4_S1_K1_OFSET];
+						else
+							IR5[k * `IR5_ROW * `IR5_COL + i * `IR5_COL + j]		<= IR4[i * `IR4_COL + j + `IR5_LOAD_IR4_S1_OFSET]; //mapping K=8 time
+		end
+		2'd1: begin//stride = 1, dw conv
+			for(k = 0; k < `IR5_DEP; k = k + 1)
+				for(i = 0; i < `IR5_ROW; i = i + 1)
+					for(j = 0; j < `IR5_COL; j = j + 1)
+						IR5[k * `IR5_ROW * `IR5_COL + i * `IR5_COL + j]		<= IR4[k * `IR4_ROW * `IR4_COL + i * `IR4_COL + j + `IR5_LOAD_IR4_S1_OFSET];
+		end
+		2'd2: begin//stride = 2, standard conv
+			for(k = 0; k < `IR5_DEP; k = k + 1)
+				for(i = 0; i < `IR5_ROW; i = i + 1)
+					for(j = 0; j < `IR5_COL; j = j + 1)
+						IR5[k * `IR5_ROW * `IR5_COL + i * `IR5_COL + j]		<= IR4[2 * i * `IR4_COL + 2 * j + `IR5_LOAD_IR4_S2_OFSET]; //mapping 8 time
+		end
+		2'd3: begin//stride = 2, dw conv
+			for(k = 0; k < `IR5_DEP; k = k + 1)
+				for(i = 0; i < `IR5_ROW; i = i + 1)
+					for(j = 0; j < `IR5_COL; j = j + 1)
+						IR5[k * `IR5_ROW * `IR5_COL + i * `IR5_COL + j]		<= IR4[k * `IR4_ROW * `IR4_COL + 2 * i * `IR4_COL + 2 * j + `IR5_LOAD_IR4_S2_OFSET];
+		end
+	endcase
+end
+//****************************************************************************************************
+
+//weight register
+//****************************************************************************************************
+always @(posedge clk) begin
+	if(weight_load_WR1) begin
+		for(i = 0; i < `WR1_DEP; i = i + 1)
+			WR1[i]			<= weight[(i + 1) * 2 * `DATA_WIDTH - 1 -: 2 * `DATA_WIDTH];
+	end
+	else begin
+		for(i = 0; i < `WR1_DEP; i = i + 1)
+			WR1[i]			<= WR1[i];
+	end
+end
+always @(posedge clk) begin
+	if(weight_load_WR2) begin
+		for(k = 0; k < `WR2_DEP; k = k + 1)
+			for(i = 0; i < `WR2_ROW; i = i + 1)
+				WR2[k * `WR2_ROW + i]	<= WR1[k];
+	end
+	else begin
+		for(i = 0; i < `WR2_DEP * `WR2_ROW; i = i + 1)
+			WR2[i]			<= 'd0;
+	end
+end
+always @(posedge clk) begin
+	for(i = 0; i < `WR2_DEP * `WR2_ROW; i = i + 1)
+		WR3[i]   <=  WR2[i];
+end
+//bias register
+//****************************************************************************************************
+always @(posedge clk) begin
+	if(bias_load_BR1) begin
+		for(i = 0; i < `BR1_DEP; i = i + 1)
+			BR1[i]			<= bias[(i + 1) * 4 * `DATA_WIDTH - 1 -: 4 * `DATA_WIDTH];
+	end
+	else begin
+		for(i = 0; i < `BR1_DEP; i = i + 1)
+			BR1[i]			<= BR1[i];
+	end
+end
+always @(posedge clk) begin
+	for(i = 0; i < `WR2_DEP; i = i + 1)
+		BR2[i]	<= BR1[i];
+end
+always @(posedge clk) begin
+	for(i = 0; i < `WR2_DEP; i = i + 1)
+		BR3[i]	<= BR2[i];
+end
+always @(posedge clk) begin
+	for(i = 0; i < `WR2_DEP; i = i + 1)
+		BR4[i]	<= BR3[i];
+end
+//****************************************************************************************************
+
+//pe control signal
+//****************************************************************************************************
+// reg	[43:0]		pe_sel_d1, pe_sel_d2, pe_sel_d3; //pe_sel_d4, pe_sel_d5, pe_sel_d6, pe_sel_d7, pe_sel_d8;
+reg	[10:0]		pe_sel_d1, pe_sel_d2, pe_sel_d3; //pe_sel_d4, pe_sel_d5, pe_sel_d6, pe_sel_d7, pe_sel_d8;
+// reg	[10:0]		pe_sel_d1, pe_sel_d2, pe_sel_d3, pe_sel_d4;//pe_sel_d5, pe_sel_d6, pe_sel_d7, pe_sel_d8;
+wire[1:0]		pe_sel_d3_ctl;
+wire[2:0]		pe_sel_d3_pw;
+reg[1:0]		pe_sel_d4_ctl, pe_sel_d5_ctl;
+reg[2:0]		pe_sel_d4_pw, pe_sel_d5_pw;
+always @(posedge clk) begin
+	pe_sel_d1		<= pe_sel;
+	pe_sel_d2		<= pe_sel_d1;
+	pe_sel_d3		<= pe_sel_d2;
+	// pe_sel_d4		<= pe_sel_d3;
+	// pe_sel_d5		<= pe_sel_d4;
+	// pe_sel_d6		<= pe_sel_d5;
+	// pe_sel_d7		<= pe_sel_d6;
+	// pe_sel_d8		<= pe_sel_d7;
+end
+
+assign 	pe_sel_d3_ctl	=	pe_sel_d3[1:0];// adapt ctl bit width
+assign 	pe_sel_d3_pw	=	pe_sel_d3[6:4];// adapt pw ,but maybe no need to use reg
+
+always @(posedge clk) begin
+	pe_sel_d4_ctl		<= pe_sel_d3_ctl;
+	pe_sel_d5_ctl		<= pe_sel_d4_ctl;
+	pe_sel_d4_pw		<= pe_sel_d3_pw;
+	pe_sel_d5_pw		<= pe_sel_d4_pw;
+	// for(i = 0; i < 4; i = i + 1) begin
+	// 	CR1[i]						<= pe_sel_d3[(i + 1) * 11 - 1 -: 11];
+	// end
+	// for(k = 0; k < `PE_ROW; k = k + 1)
+	// 	for(j = 0; j < `PE_COL ; j = j + 1)
+	// 		for(i = 0; i < 4; i = i + 1) begin
+	// 			CR2[k * `PE_COL * 4 + j * 4 + i]					<= CR1[i];
+	// 		end
+
+	// for(i = 0; i < `PE_ROW; i = i + 1)
+	// 		CR1[i]					<= pe_sel_d3;
+	
+	// for(i = 0; i < `PE_ROW; i = i + 1) begin
+	// 	for(j = 0; j < `PE_COL; j = j + 1)
+	// 		CR2[i * `PE_ROW + j]	<= CR1[i];
+	// end
+end
+
+// reg	[43:0]		pe_sel_P1_d1, pe_sel_P1_d2, pe_sel_P1_d3, pe_sel_P1_d4, pe_sel_P1_d5, pe_sel_P1_d6, pe_sel_P1_d7, pe_sel_P1_d8;
+reg	[10:0]		pe_sel_P1_d1, pe_sel_P1_d2, pe_sel_P1_d3, pe_sel_P1_d4;//pe_sel_P1_d5, pe_sel_P1_d6, pe_sel_P1_d7, pe_sel_P1_d8;
+// reg	[10:0]		pe_sel_P1_d1, pe_sel_P1_d2, pe_sel_P1_d3, pe_sel_P1_d4, pe_sel_P1_d5;// pe_sel_P1_d6, pe_sel_P1_d7, pe_sel_P1_d8;
+always @(posedge clk) begin
+	pe_sel_P1_d1		<= pe_sel_P1;
+	pe_sel_P1_d2		<= pe_sel_P1_d1;
+	pe_sel_P1_d3		<= pe_sel_P1_d2;
+	pe_sel_P1_d4		<= pe_sel_P1_d3;
+	// pe_sel_P1_d5		<= pe_sel_P1_d4;
+	// pe_sel_P1_d6		<= pe_sel_P1_d5;
+	// pe_sel_P1_d7		<= pe_sel_P1_d6;
+	// pe_sel_P1_d8		<= pe_sel_P1_d7;
+end
+always @(posedge clk) begin
+	// for(i = 0; i < 4; i = i + 1)
+	// 	CR1_P1[i]						<= pe_sel_P1_d8[(i + 1) * 11 - 1 -: 11];
+	// for(k = 0; k < `PE_ROW; k = k + 1)
+	// 	for(j = 0; j < `PE_COL ; j = j + 1)
+	// 		for(i = 0; i < 4; i = i + 1)
+	// 			CR2_P1[k * `PE_COL * 4 + j * 4 + i]					<= CR1_P1[i];
+
+	for(i = 0; i < `PE_ROW; i = i + 1)
+		CR1_P1[i]					<= pe_sel_P1_d4;
+
+	for(i = 0; i < `PE_ROW; i = i + 1) begin
+		for(j = 0; j < `PE_COL; j = j + 1)
+			CR2_P1[i * `PE_ROW + j]	<= CR1_P1[i];
+	end
+end
+
+//****************************************************************************************************
+
+//shift register
+//****************************************************************************************************
+always @(posedge clk) begin
+	if(shift_load_SR) begin
+		for(i = 0; i < `PE_DEP; i = i + 1)
+			SR1[i]			<= shift[(i + 1) * 2 * `DATA_WIDTH - 1 -: 2 * `DATA_WIDTH];
+	end
+	else begin
+		for(i = 0; i < `PE_DEP; i = i + 1)
+			SR1[i]			<= SR1[i];
+	end
+end
+//****************************************************************************************************
+
+//psum(residual)
+//****************************************************************************************************
+always @(posedge clk) begin
+	if (rst) begin
+		for(i = 0; i < `PE_DEP * `PE_ROW; i = i + 1)
+			PR1[i]		<= 'd0;
+	end	
+	else if(psum_load_PR1) begin
+		for(i = 0; i < `PE_ROW; i = i + 1) begin
+			for(k = 0; k < `PE_DEP; k = k + 1)
+				PR1[k * `PE_ROW + i]	   <= indata_psum[(i * 8 + k + 1) * 24 - 1 -:  24];  //total 16 channels
+		end
+	end
+	else begin
+		for(i = 0; i < `PE_DEP * `PE_ROW; i = i + 1)
+			PR1[i]								<= PR1[i];
+	end
+
+	for(i = 0; i < `PE_DEP * `PE_ROW; i = i + 1)
+		PR2[i]								<= PR1[i];
+	for(i = 0; i < `PE_DEP * `PE_ROW; i = i + 1)
+		PR3[i]								<= PR2[i];
+end
+// always @(posedge clk) begin
+// 	if (rst) begin
+// 		for(i = 0; i < `PE_DEP * `PE_ROW * `PE_COL * 2; i = i + 1)
+// 			PR1[i]		<= 'd0;
+// 	end	
+// 	else if(psum_load_PR1) begin
+// 		for(i = 0; i < `PE_ROW; i = i + 1) begin
+// 			for(j = 0; j < 2 * `PE_COL - 1; j = j + 1)
+// 				for(k = 0; k < `PE_DEP; k = k + 1)
+// 					PR1[k * `PE_ROW * `PE_COL * 2 + i * `PE_COL * 2 + j]		<= PR1[k * `PE_ROW * `PE_COL * 2 + i * `PE_COL * 2 + j + 1];
+// 			for(k = 0; k < `PE_DEP; k = k + 1)
+// 				PR1[k * `PE_ROW * `PE_COL * 2 + (i + 1) * `PE_COL * 2 - 1]	   <= indata_psum[(i * 8 + k + 1) * 24 - 1 -:  24];  //total 16 channels
+// 				// PR1[(i + 1) * `PE_COL - 1]	<= psum_CF[((i + 1) * 2 - 0) * `DATA_WIDTH - 1 -: `DATA_WIDTH];  //high 8
+// 		end
+// 	end
+// 	else begin
+// 		for(i = 0; i < `PE_DEP * `PE_ROW * `PE_COL * 2; i = i + 1)
+// 			PR1[i]								<= PR1[i];
+// 	end
+// end
+
+// always @(posedge clk) begin
+// 	if (rst) begin
+// 		for(i = 0; i < `PE_DEP * `PE_ROW; i = i + 1)
+// 			PR2[i]		<= 'd0;
+// 	end	
+// 	else if(psum_load1_PR2) begin
+// 		for(i = 0; i < `PE_ROW; i = i + 1) 
+// 			// for(j = 0; j < `PE_COL; j = j + 1)
+// 				for(k = 0; k < `PE_DEP / 2; k = k + 1) begin
+// 					PR2[(k + 0) * `PE_ROW + i]			        <= PR1[(2 * k + 0) * `PE_ROW * `PE_COL * 2 + i * `PE_COL * 2 + (2 * COL_cnt2 + 0)];
+// 					PR2[(k + (`PE_DEP / 2)) * `PE_ROW + i]		<= PR1[(2 * k + 0) * `PE_ROW * `PE_COL * 2 + i * `PE_COL * 2 + (2 * COL_cnt2 + 1)];
+// 				end
+// 			end
+// 	else if(psum_load2_PR2) begin
+// 		for(i = 0; i < `PE_ROW; i = i + 1) 
+// 			// for(j = 0; j < `PE_COL; j = j + 1)
+// 				for(k = 0; k < `PE_DEP / 2; k = k + 1) begin
+// 					PR2[(k + 0) * `PE_ROW + i]			        <= PR1[(2 * k + 1) * `PE_ROW * `PE_COL * 2 + i * `PE_COL * 2 + (2 * COL_cnt2 + 1)];
+// 					// PR2[(k + 0) * `PE_ROW + i]			        <= PR1[(2 * k + 1) * `PE_ROW * `PE_COL * 2 + i * `PE_COL * 2 + (2 * COL_cnt2 + 0)];
+// 					PR2[(k + (`PE_DEP / 2)) * `PE_ROW + i]		<= PR1[(2 * k + 1) * `PE_ROW * `PE_COL * 2 + i * `PE_COL * 2 + (2 * COL_cnt2 + 1)];
+// 				end
+// 			end
+// 	else begin
+// 		for(i = 0; i < `PE_DEP * `PE_ROW; i = i + 1)
+// 			PR2[i]									<= PR2[i];
+// 	end
+// end
+//****************************************************************************************************
+
+///////////////////////////////////////adapt PE1/////////////////////////////////////////////////////////////////////////////////////////
+// reg [1:0]											CR2_ctl_d1[`PE_ROW * `PE_COL - 1 : 0];
+// reg [1:0]											CR2_ctl_d2[`PE_ROW * `PE_COL - 1 : 0];
+// reg [1:0]											CR2_ctl_d3[`PE_ROW * `PE_COL - 1 : 0];
+// reg [1:0]											CR2_ctl_d4[`PE_ROW * `PE_COL - 1 : 0];
+// reg 												cls[`PE_ROW * `PE_COL - 1 : 0];
+// reg 												PW[`PE_ROW * `PE_COL - 1 : 0];
+// always @(posedge clk) begin
+// 	for(i = 0; i < `PE_ROW * `PE_COL; i = i + 1)	CR2_ctl_d1[i] <= CR2_ctl[i];	
+// 	for(i = 0; i < `PE_ROW * `PE_COL; i = i + 1)	CR2_ctl_d2[i] <= CR2_ctl_d1[i];
+// 	for(i = 0; i < `PE_ROW * `PE_COL; i = i + 1)	CR2_ctl_d3[i] <= CR2_ctl_d2[i];
+// 	for(i = 0; i < `PE_ROW * `PE_COL; i = i + 1)	CR2_ctl_d4[i] <= CR2_ctl_d3[i];
+// end
+
+// always @( *) begin
+// 	for(i = 0; i < `PE_ROW * `PE_COL; i = i + 1)	cls[i] <= (CR2_ctl_d4[i][1:0] == 'd0);
+// 	// for(i = 0; i < `PE_ROW * `PE_COL * 4; i = i + 1)	cls_or[i] <= (CR2_d3[i][0] | CR2_d4[i][0] == 'd0);	
+// 	for(i = 0; i < `PE_ROW * `PE_COL; i = i + 1)	PW[i] <= (CR2_PW[i][2:0] == 3'b111);
+// end
+reg [1:0]											CR2_ctl_d1;
+reg [1:0]											CR2_ctl_d2;
+reg [1:0]											CR2_ctl_d3;
+reg [1:0]											CR2_ctl_d4;
+reg [1:0]											CR2_ctl_d5;
+wire 												cls;
+wire 												PW;
+always @(posedge clk) begin
+	CR2_ctl_d1 <= pe_sel_d5_ctl;	
+	CR2_ctl_d2 <= CR2_ctl_d1;
+	CR2_ctl_d3 <= CR2_ctl_d2;
+	CR2_ctl_d4 <= CR2_ctl_d3;
+	CR2_ctl_d5 <= CR2_ctl_d4;
+end
+assign cls = deepwise_conv ? (CR2_ctl_d4 == 0) | sel_DW_9_d3 : (CR2_ctl_d4 == 0);
+assign PW = (pe_sel_d5_pw == 3'b111);
+
+reg[`DATA_WIDTH - 1 : 0]	IR5_pwindata[`IR5_ROW *  `IR5_COL * `IR5_DEP - 1 : 0];// 7 * 7 * 8
+
+
+
+always @( *) begin
+	if(PW)
+		for(k = 0; k < `IR5_DEP; k = k + 1)
+			for(j = 0; j < `IR5_ROW; j = j + 1)
+				for(i = 0; i < `IR5_COL; i = i + 1)
+					IR5_pwindata[k * `IR5_ROW * `IR5_COL + j * `IR5_COL + i] <= PWINDATA[ j * `IR5_COL + i];
+	else
+		for(i = 0; i < `IR5_DEP * `IR5_ROW * `IR5_COL; i = i + 1)		
+			IR5_pwindata[i] <= IR5[i];	
+end
+
+reg[2:0]	ifm_bit_DW_d1, ifm_bit_DW_d2, ifm_bit_DW_d3, ifm_bit_DW_d4, ifm_bit_DW_d5; 
+reg[1:0]	wts_bit_DW_d1, wts_bit_DW_d2, wts_bit_DW_d3, wts_bit_DW_d4, wts_bit_DW_d5; 
+// reg[1:0]	parallel_mode_DW_d1, parallel_mode_DW_d2, parallel_mode_DW_d3, parallel_mode_DW_d4, parallel_mode_DW_d5; 
+always @(posedge clk) begin
+	ifm_bit_DW_d1 <= ifm_bit_DW;
+	ifm_bit_DW_d2 <= ifm_bit_DW_d1;
+	ifm_bit_DW_d3 <= ifm_bit_DW_d2;
+	ifm_bit_DW_d4 <= ifm_bit_DW_d3;
+	ifm_bit_DW_d5 <= ifm_bit_DW_d4;
+
+	wts_bit_DW_d1 <= wts_bit_DW;
+	wts_bit_DW_d2 <= wts_bit_DW_d1;
+	wts_bit_DW_d3 <= wts_bit_DW_d2;
+	wts_bit_DW_d4 <= wts_bit_DW_d3;
+	wts_bit_DW_d5 <= wts_bit_DW_d4;
+
+
+end
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//outdata register
+//****************************************************************************************************
+
+
+
+always @(*) begin
+// always @(posedge clk) begin
+	// outdata_CF = OR_CF[0];
+	// outdata_CL =  OR_CL[0] ;
+		for(i = 0; i < `PE_ROW; i = i + 1)
+			for(k = 0; k < `PE_DEP; k = k + 1) begin
+				outdata_CL[(i * `PE_DEP + (k + 1)) * `DATA_WIDTH - 1 -: `DATA_WIDTH] <= PE_outdata_8[k * `PE_ROW + i];
+				outdata_CL_psum[(i * `PE_DEP + (k + 1)) * 24 - 1 -: 24] 		     <= PE_outdata_8_psum[k * `PE_ROW + i];
+			end
+
+end
+//****************************************************************************************************
+
+//outdata_psum register
+//****************************************************************************************************
+
+always @(posedge clk) begin
+	if(outdata_psum_en)begin
+		for(k = 0; k < `PE_DEP; k = k + 1)        
+			for(i = 0; i < `PE_ROW; i = i + 1)
+				for(j = 0; j < `PE_COL; j = j + 1)
+					PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL + j]		<= PE1_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL + j];
+					// PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL + j]		<= ofm[k * `PE_ROW * `PE_COL + i * `PE_COL + j];
+	end 
+	// else if(outdata_psum_shift2)begin
+	// else if(outdata_psum_shift_cnt)begin
+	else if(outdata_psum_shift)begin
+		for(k = 0; k < `PE_DEP; k = k + 1)        
+			for(i = 0; i < `PE_ROW; i = i + 1)
+				for(j = 0; j < `PE_COL - 1; j = j + 1)
+					PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL + j]		<= PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL + j + 1];
+	end
+	else if(outdata_psum_shift_cnt)begin
+		for(k = 0; k < `PE_DEP; k = k + 1)        
+			for(i = 0; i < `PE_ROW; i = i + 1)
+				for(j = 0; j < `PE_COL; j = j + 1)
+					PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL + j]		<= PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL + j];
+	end
+	else begin
+		for(k = 0; k < `PE_DEP; k = k + 1)        
+			for(i = 0; i < `PE_ROW; i = i + 1)
+				for(j = 0; j < `PE_COL; j = j + 1)
+					PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL + j]		<= 'd0;
+	end
+end
+
+reg[47:0]	PE_psum_outdata2_reg[`PE_ROW * `PE_DEP - 1 : 0];
+always @(*) begin
+// always @(posedge clk) begin  
+	for(k = 0; k < `PE_DEP; k = k + 1)        
+		for(i = 0; i < `PE_ROW; i = i + 1)
+					case(parallel_mode_DW)
+						2'd1:		PE_psum_outdata2_reg[k * `PE_ROW + i]	<= {PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][39:28], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][27:16], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][47:40], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][15:0]};
+						2'd2:		PE_psum_outdata2_reg[k * `PE_ROW + i]	<= {PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][51:48], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][39:28], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][43:40], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][27:16], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][15:0]};
+						2'd3:		PE_psum_outdata2_reg[k * `PE_ROW + i]	<= {PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][53:48], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][45:40], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][39:28], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][27:16], PE_psum_outdata[k * `PE_ROW * `PE_COL + i * `PE_COL][11:0]};
+						default:	PE_psum_outdata2_reg[k * `PE_ROW + i]	<= 48'd0;
+					endcase
+
+end
+
+// always @(posedge clk)begin
+// 	for(i = 0; i < `PE_ROW; i = i + 1) 
+// 		for(k = 0; k < `PE_DEP; k = k + 1)        
+// 			begin
+// 			// for(j = 0; j < 2; j = j + 1)
+// 				PE_psum_outdata2_reg_reg[(i * `PE_DEP * 2 + k + 1) * 24 - 1 -: 24]				<= PE_psum_outdata2_reg[k * `PE_ROW + i][23:0];
+// 				PE_psum_outdata2_reg_reg[(i * `PE_DEP * 2 + (k + `PE_DEP) + 1) * 24 - 1 -: 24]	<= PE_psum_outdata2_reg[k * `PE_ROW + i][47:24];
+// 		end
+// end
+
+// always @(posedge clk) begin
+// // always @(*) begin
+// 	for(i = 0; i < 7; i = i + 1)
+// 		store_en_[i]	<=	store_en[i];
+// end 
+
+//pwindata
+//****************************************************************************************************
+genvar m, n, o;
+generate
+	for(m = 0; m < `PE_ROW; m = m + 1) begin: PW_BUF_ROW
+		for(n = 0; n < `PE_COL; n = n + 1) begin: PW_BUF_COL
+			PWINDATA_BUF PWINDATA_BUF_inst (
+				.clka	( clk                       ),
+				// .ena	( store_en_[n]              ),
+				// .wea	( store_en_[n]              ),
+				.ena	( store_en[n]              ),
+				.wea	( store_en[n]              ),
+				.addra	( store_addr  	            ),
+				// .dina	( PE_psum_outdata[m * `PE_COL + n]  ),
+				// .dina	( OR[m * `PE_COL + n]       ),
+				.dina	( outdata_CL[`DATA_WIDTH * `PE_DEP * (m + 1) - 1 -: `DATA_WIDTH * `PE_DEP]       ),
+				.clkb	( clk                       ),
+				.enb	( pwindata_en               ),
+				.addrb	( pwindata_addr             ),
+				.doutb	( PWINDATA[m * `PE_COL + n] )
+			);
+	end end
+endgenerate
+//****************************************************************************************************
+
+//PE array
+//****************************************************************************************************
+generate
+	for(o = 0; o < `PE_DEP; o = o + 1) begin: PE_DEP
+		for(m = 0; m < `PE_ROW; m = m + 1) begin: PE_ROW
+			// for(n = 0; n < 4; n = n + 1) begin: PE_COL
+				PE PE_inst(
+					.clk			( clk                                       ),
+					.rst			( rst                                       ),
+					.sel			( CR2_P1[m  * `PE_COL]                      ),
+					.ifm			( PE_psum_outdata2_reg[o * `PE_ROW + m]     ),
+					.gamma			( 'd1                           			),
+					.bias			( BR4[o]                        			),
+//                    .bias			('d0                       			),
+					.x0		        ( 0                             			),
+					.x1		        ( 0                             			),
+					.residual	    ( residual                      			),
+					// .psum			( PR2[o * `PE_ROW + m]          			),
+					.psum			( PR3[o * `PE_ROW + m]          			),
+					// .residual_data	( PR2[o * `PE_ROW + m]          			),
+					.shift			( SR1[o ]                         ),
+                    .layer          (layer),
+                    .start_psum        (start_psum),
+                    .ofm_psum	    ( PE_outdata_8_psum[o * `PE_ROW + m] 			),
+					.ofm	        ( PE_outdata_8[o * `PE_ROW + m] 			)
+					// .sel				( CR2_or_CR2_P1[m  * `PE_COL]                        ),
+					// .ifm				( PE_psum_outdata[o * `PE_ROW * `PE_COL + m * `PE_COL ]    ),
+					// .psum			( psum    ),
+					// .ofm			    ( PE_outdata_8[o * `PE_ROW * 4 + m * 4 + n] )
+				);
+	end end //end
+endgenerate
+
+generate
+	for(o = 0; o < `PE_DEP; o = o + 1) begin: PE_DEP1
+		for(m = 0; m < `PE_ROW; m = m + 1) begin: PE_ROW1
+			for(n = 0; n < `PE_COL; n = n + 1) begin: PE_COL1
+				PE1 PE1_inst(
+					.clk		   ( clk                                                     ),
+					.rst		   ( rst                                                     ),
+					.ctl_d3		   ( CR2_ctl_d3                                              ),
+					.ctl_d4		   ( CR2_ctl_d4                                              ),
+					.cls		   ( cls                                                     ),
+					.ifm		   ( IR5_pwindata[o * `PE_ROW * `PE_COL + m * `PE_COL + n]   ),
+					.wts		   ( WR3[o * `PE_ROW + m]                                    ),
+					.parallel_mode ( parallel_mode_DW  	                                     ),
+					.ifm_bit       ( ifm_bit_DW_d5			                                 ),
+					.wts_bit       ( wts_bit_DW_d5			                                 ),
+					.ofm	       ( PE1_outdata[o * `PE_ROW * `PE_COL + m * `PE_COL + n]    )
+					// .sel		   ( CR2[m  * `PE_COL * 4 + n * 4]                       ),
+					// .ctl_d3		   ( CR2_ctl_d3[m * `PE_COL + n]                                ),
+					// .pwindata	   ( PWINDATA[m * `PE_COL + n]                           ),
+					// .parallel_mode ( parallel_mode_DW_d5  	                                 ),
+					// .sel_DW_9      ( sel_DW_9			                                 ),
+					// .sel_DW_9_d6   ( sel_DW_9_d6			                             ),
+				);
+	end end end
+endgenerate
+//****************************************************************************************************
+
+
+
+
+
+//
+// wire [`DATA_WIDTH - 1 : 0] IR5_pwindata_test;
+// assign IR5_pwindata_test = IR5_pwindata[0];
+// wire [`DATA_WIDTH * 2 - 1 :0]						WR3_test;
+// assign WR3_test = WR3[0];
+// wire[53 : 0]										PE1_outdata_test;
+// assign PE1_outdata_test = PE1_outdata[0];
+//
+
+
+// wire [47:0]	PE_psum_outdata2_reg_test;
+// assign PE_psum_outdata2_reg_test = PE_psum_outdata2_reg[0];
+// wire [`DATA_WIDTH * 4 - 1 :0] BR4_test;
+// assign BR4_test = BR4[0];
+// wire [23 : 0] PR3_test;
+// assign PR3_test = PR3[0];
+// wire [`DATA_WIDTH * 2 - 1 :0] SR1_test;
+// assign SR1_test = SR1[0];
+// wire [23 : 0] PE_outdata_8_psum_test;
+// assign PE_outdata_8_psum_test = PE_outdata_8_psum[0];
+// wire [`DATA_WIDTH - 1 : 0] PE_outdata_8_test;
+// assign PE_outdata_8_test = PE_outdata_8[0];
+
+// PE_ila MAC_ila (
+// 	.clk(clk), // input wire clk
+
+
+// 	.probe0({
+// 	//    indata_load_IR3_test,
+//        PE_psum_outdata2_reg_test,
+//        BR4_test,
+// 	   PR3_test,
+// 	   SR1_test,
+// 	   PE_outdata_8_psum_test,
+// 	   PE_outdata_8_test
+// 	}) // input wire [199:0] probe0
+// );
+
+
+
+
+
+
+
+
+//initial IRs in simulation
+//****************************************************************************************************
+initial begin
+	for(i = 0; i < `IR3_ROW * `IR3_COL * `IR3_DEP; i = i + 1)
+		IR3[i]		<= 'd0;
+	for(i = 0; i < `IR4_ROW * `IR4_COL * `IR4_DEP; i = i + 1)
+		IR4[i]		<= 'd0;
+	for(i = 0; i < `IR5_ROW * `IR5_COL * `IR5_DEP; i = i + 1)
+		IR5[i]		<= 'd0;
+	
+	for(i = 0; i < `WR1_DEP; i = i + 1)
+		WR1[i]		<= 'd0;
+	for(i = 0; i < `WR2_DEP * `WR2_ROW; i = i + 1)
+		WR2[i]		<= 'd0;
+	for(i = 0; i < `WR1_DEP; i = i + 1)
+		BR1[i]		<= 'd0;
+	for(i = 0; i < `WR2_DEP ; i = i + 1)
+		BR2[i]		<= 'd0;
+	
+	// for(i = 0; i < `PE_ROW; i = i + 1)
+	// 	CR1[i]		<= 'd0;
+	// for(i = 0; i < `PE_ROW * `PE_COL; i = i + 1)
+	// 	CR2[i]		<= 'd0;
+	
+	// for(i = 0; i < `PE_ROW; i = i + 1)
+	// 	SR1[i]		<= 'd0;
+	// for(i = 0; i < `PE_ROW * `PE_COL; i = i + 1)
+	// 	SR2[i]		<= 'd0;
+	
+	// for(i = 0; i < `PE_ROW * `PE_COL * `PE_DEP * 2; i = i + 1)
+	// 	OR[i]		<= 'd0;
+	// // for(i = 0; i < 1; i = i + 1)
+	// // 	OR_CL[i]	<= 'd0;
+	// for(i = 0; i < `PE_COL * 2; i = i + 1)
+	// 	OR_CL[i]	<= 'd0;
+	// for(i = 0; i < `PE_ROW * `PE_DEP; i = i + 1)
+	// 	PE_outdata_16[i]	<= 'd0;
+
+		// outdata_CL	<= 'd0;
+end
+
+
+endmodule
