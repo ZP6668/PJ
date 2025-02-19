@@ -1,0 +1,590 @@
+//`include "E:/code/vivado2018/MAC_20.1.6/MAC_DSP_6.10/cnn_parameter.v"
+`timescale 1ns/100ps
+
+module MAC(
+	input														clk,
+	input														rst,
+	input		[2:0]											tk,
+	input		[1:0]											net_type,			// 01: convolution , 00: full connection; 10: only pooling
+	input		[2:0]											pooling_type,
+	input														conv_stride,		// 1:s=1 0:s=2
+	input		[`SHIFT_WIDTH - 1 : 0]							conv_shift_num,		// after conv_multipler shift number
+	input		[`SHIFT_WIDTH - 1 : 0]							regular_shift_num,	// after regular_multipler shift num
+	input		[7:0]											sel,
+	input		[1:0]											shift_dir,
+	input		[1:0]											conv_type,
+	input		[4:0]											qval,
+	
+	input		[3:0]											pool_R,
+	input		[4:0]											pool_C,
+	
+	input														weight_bias_en,
+	input		[3:0]											inwreb_16,
+	input		[`WBUF_DATAB_WIDTH - 1 : 0]						weight,
+	
+	input														psum_en,
+	input		[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH - 1 : 0]		psum_data,
+	
+	input		[`WR_DEPTH * `DATA_WIDTH - 1 : 0]				pooling_data,
+	
+	input		[`WR_DEPTH * `DATA_WIDTH - 1 : 0]				dsh,				// data sharing array
+
+	input														outdata_en,
+	input		[4:0]											out_cnt,			// count for output
+	output	reg	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 : 0]	out_data
+);
+
+//****************************************************************************************************
+integer										i, j;
+reg		[2:0]								tk_reg;
+reg		[1:0]								net_type_reg;
+reg											conv_stride_reg;
+reg											weight_bias_en_reg;
+reg											weight_bias_en_reg_reg;
+reg											psum_en_reg;
+reg											psum_en_reg_reg;
+reg											psum_en_reg_reg_reg;
+reg											outdata_en_reg;
+reg											outdata_en_reg_reg;
+reg											outdata_en_reg_reg_reg;
+reg		[4:0]								out_cnt_reg;
+reg		[4:0]								out_cnt_reg_reg;
+reg		[4:0]								out_cnt_reg_reg_reg;
+reg		[4:0]								out_cnt_reg_reg_reg_reg;
+reg		[3:0]								inwreb_16_reg;
+reg		[3:0]								inwreb_16_reg_reg;
+reg		[7:0]								sel_reg;
+reg		[7:0]								sel_reg_reg;
+reg		[7:0]								sel_reg_reg_reg;
+reg		[7:0]								sel_reg_reg_reg_reg[`WR_DEPTH_ROW - 1 : 0];
+reg		[1:0]								shift_dir_reg;
+reg		[1:0]								shift_dir_reg_reg;
+reg		[1:0]								conv_type_reg;
+reg		[4:0]								qval_reg;
+reg		[4:0]								pool_R_reg;
+reg		[3:0]								pool_C_reg;
+
+reg		[`DATA_WIDTH - 1 : 0]				relu6_6[`WR_DEPTH_ROW - 1 : 0];
+reg		[`DATA_WIDTH - 1 : 0]				relu6_6_reg[`WR_DEPTH - 1 : 0];
+
+reg		[`WEIGHT_WIDTH - 1 : 0]				WR1[`WR_DEPTH - 1 : 0];
+reg		[`WEIGHT_WIDTH - 1 : 0]				WR2[`WR_DEPTH - 1 : 0];
+
+reg		[`DATA_WIDTH - 1 : 0]				PR1[`WR_DEPTH - 1 : 0];
+reg		[`DATA_WIDTH - 1 : 0]				PR2[`WR_DEPTH - 1 : 0];
+
+reg		[`DATA_WIDTH - 1 : 0]				X0[`WR_DEPTH - 1 : 0];
+reg		[`DATA_WIDTH - 1 : 0]				X1[`WR_DEPTH - 1 : 0];
+
+reg		[`SHIFT_WIDTH - 1 : 0]				shift_num;
+reg		[`SHIFT_WIDTH - 1 : 0]				shift_num_reg[`WR_DEPTH_ROW - 1 : 0];
+
+reg		[`DATA_WIDTH - 1 : 0]				OR[`WR_DEPTH - 1 : 0];
+wire	[`DATA_WIDTH - 1 : 0]				PE_out_data[`WR_DEPTH - 1 : 0];
+
+reg		[2:0]								load_WR1;
+reg											load_WR2;
+reg		[1:0]								load_OR;
+//****************************************************************************************************
+
+//initial
+//****************************************************************************************************
+initial begin
+	for(i = 0; i < `WR_DEPTH; i = i + 1) begin
+		WR1[i]			= `WEIGHT_WIDTH 'b0;
+		WR2[i]			= `WEIGHT_WIDTH 'b0;
+		
+		PR1[i]			= `DATA_WIDTH 'b0;
+		PR2[i]			= `DATA_WIDTH 'b0;
+		
+		X0[i]			= `DATA_WIDTH 'b0;
+		X1[i]			= `DATA_WIDTH 'b0;
+		
+		OR[i]			= `DATA_WIDTH 'b0;
+	end
+end
+//****************************************************************************************************
+
+//updata control signal
+//****************************************************************************************************
+always @(posedge clk) begin
+	tk_reg						<= tk;
+	net_type_reg				<= net_type;
+	conv_stride_reg				<= conv_stride;
+	weight_bias_en_reg			<= weight_bias_en;
+	weight_bias_en_reg_reg		<= weight_bias_en_reg;
+	psum_en_reg					<= psum_en;
+	psum_en_reg_reg				<= psum_en_reg;
+	psum_en_reg_reg_reg			<= psum_en_reg_reg;
+	outdata_en_reg				<= outdata_en;
+	outdata_en_reg_reg			<= outdata_en_reg;
+	outdata_en_reg_reg_reg		<= outdata_en_reg_reg;
+	out_cnt_reg					<= out_cnt;
+	out_cnt_reg_reg				<= out_cnt_reg;
+	out_cnt_reg_reg_reg			<= out_cnt_reg_reg;
+	out_cnt_reg_reg_reg_reg		<= out_cnt_reg_reg_reg;
+	inwreb_16_reg				<= inwreb_16;
+	inwreb_16_reg_reg			<= inwreb_16_reg;
+	shift_dir_reg				<= shift_dir;
+	shift_dir_reg_reg			<= shift_dir_reg;
+	conv_type_reg				<= conv_type;
+	qval_reg					<= qval;
+	pool_R_reg					<= pool_R;
+	pool_C_reg					<= pool_C;
+end
+//****************************************************************************************************
+
+//weight
+//****************************************************************************************************
+always @(posedge clk) begin
+	case(net_type_reg)
+		2'b00:				load_WR1	<= weight_bias_en_reg ? 3'd1 : 3'd0;
+		2'b01: begin
+			case(conv_type_reg)
+				2'b00:		load_WR1	<= weight_bias_en_reg ? ((sel_reg == 8'b00010101) ? 3'd2 : (((sel_reg == 8'b00011011) | (sel_reg == 8'b00000101)) ? 3'd3 : 3'd0)) : 3'd0;
+				2'b01:		load_WR1	<= weight_bias_en_reg ? ((sel_reg == 8'b00010101) ? 3'd4 : (((sel_reg == 8'b00011011) | (sel_reg == 8'b00000101)) ? 3'd5 : 3'd0)) : 3'd0;
+				2'b10:		load_WR1	<= weight_bias_en_reg ? (((sel_reg == 8'b00010101) | (sel_reg == 8'b00011011) | (sel_reg == 8'b00000101)) ? 3'd6 : 3'd0) : 3'd0;
+				default:	load_WR1	<= 3'd0;
+			endcase
+		end
+		default:			load_WR1	<= 3'd0;
+	endcase
+end
+
+always @(posedge clk) begin
+	case(load_WR1)
+		3'd1: begin//full-connection
+			case(inwreb_16)
+				4'd1: begin
+					for(i = 0; i < `WR_DEPTH_COL; i = i + 1) begin
+						WR1[ 0 * `WR_DEPTH_COL + i]			<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						WR1[ 1 * `WR_DEPTH_COL + i]			<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					end
+				end
+				4'd2: begin
+					for(i = 0; i < `WR_DEPTH_COL; i = i + 1) begin
+						WR1[ 2 * `WR_DEPTH_COL + i]			<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						WR1[ 3 * `WR_DEPTH_COL + i]			<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					end
+				end
+				4'd3: begin
+					for(i = 0; i < `WR_DEPTH_COL; i = i + 1) begin
+						WR1[ 4 * `WR_DEPTH_COL + i]			<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						WR1[ 5 * `WR_DEPTH_COL + i]			<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					end
+				end
+				4'd4: begin
+					for(i = 0; i < `WR_DEPTH_COL; i = i + 1) begin
+						WR1[ 6 * `WR_DEPTH_COL + i]			<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						WR1[ 7 * `WR_DEPTH_COL + i]			<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					end
+				end
+				4'd5: begin
+					for(i = 0; i < `WR_DEPTH_COL; i = i + 1) begin
+						WR1[ 8 * `WR_DEPTH_COL + i]			<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						WR1[ 9 * `WR_DEPTH_COL + i]			<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					end
+				end
+				4'd6: begin
+					for(i = 0; i < `WR_DEPTH_COL; i = i + 1) begin
+						WR1[10 * `WR_DEPTH_COL + i]			<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						WR1[11 * `WR_DEPTH_COL + i]			<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					end
+				end
+				4'd7: begin
+					for(i = 0; i < `WR_DEPTH_COL; i = i + 1) begin
+						WR1[12 * `WR_DEPTH_COL + i]			<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						WR1[13 * `WR_DEPTH_COL + i]			<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					end
+				end
+				default: begin
+					for(i = 0; i < `WR_DEPTH; i = i + 1) begin
+						WR1[i]		<= WR1[i];
+					end
+				end
+			endcase
+		end
+		3'd2: begin//tk=1,2 s=1 conv
+			for(i = 0; i < `WR_DEPTH_COL; i = i + 1)
+				for(j = 0; j < `WR_DEPTH_ROW; j = j + 1) begin
+					case(inwreb_16_reg_reg)
+						4'd1:		WR1[j * `WR_DEPTH_COL + i]	<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						4'd2:		WR1[j * `WR_DEPTH_COL + i]	<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						default:	WR1[j * `WR_DEPTH_COL + i]	<= WR1[j * `WR_DEPTH_COL + i];
+					endcase
+				end
+		end
+		3'd3: begin////tk=1,2 s=1 bias or regular
+			for(i = 0; i < `WR_DEPTH_COL; i = i + 1)
+				for(j = 0; j < `WR_DEPTH_ROW; j = j + 1) begin
+					WR1[j * `WR_DEPTH_COL + i]					<= weight[(i + 1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+				end
+		end
+		3'd4: begin//tk=3,5,7 s=1 conv
+			for(i = 0; i < 4; i = i + 1)
+				for(j = 0; j < `WR_DEPTH_ROW; j = j + 1) begin
+					case(inwreb_16_reg_reg)
+						4'd1: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= weight[ 1 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= weight[ 2 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= weight[ 3 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= weight[ 4 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						end
+						4'd2: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= weight[ 5 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= weight[ 6 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= weight[ 7 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= weight[ 8 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						end
+						4'd3: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= weight[ 9 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= weight[10 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= weight[11 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= weight[12 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						end
+						4'd4: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= weight[13 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= weight[14 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= weight[15 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= weight[16 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						end
+						4'd5: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= weight[17 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= weight[18 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= weight[19 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= weight[20 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						end
+						4'd6: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= weight[21 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= weight[22 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= weight[23 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= weight[24 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						end
+						4'd7: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= weight[25 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= weight[26 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= weight[27 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= weight[28 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						end
+						4'd8: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= weight[29 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= weight[30 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= weight[31 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= weight[32 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+						end
+						default: begin
+							WR1[j * `WR_DEPTH_COL + i +  0]		<= WR1[j * `WR_DEPTH_COL + i +  0];
+							WR1[j * `WR_DEPTH_COL + i +  4]		<= WR1[j * `WR_DEPTH_COL + i +  4];
+							WR1[j * `WR_DEPTH_COL + i +  8]		<= WR1[j * `WR_DEPTH_COL + i +  8];
+							WR1[j * `WR_DEPTH_COL + i + 12]		<= WR1[j * `WR_DEPTH_COL + i + 12];
+						end
+					endcase
+				end
+		end
+		3'd5: begin//tk=3,5,7 s=1 bias or regular
+			for(i = 0; i < 4; i = i + 1)
+				for(j = 0; j < `WR_DEPTH_ROW; j = j + 1) begin
+					WR1[j * `WR_DEPTH_COL + i +  0]				<= weight[1 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					WR1[j * `WR_DEPTH_COL + i +  4]				<= weight[2 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					WR1[j * `WR_DEPTH_COL + i +  8]				<= weight[3 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					WR1[j * `WR_DEPTH_COL + i + 12]				<= weight[4 * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+				end
+		end
+		3'd6: begin//s=2
+			for(i = 0; i < (`WR_DEPTH_COL / 2); i = i + 1)
+				for(j = 0; j < (`WR_DEPTH_ROW / 2); j = j + 1) begin
+					WR1[j * `WR_DEPTH_COL + i]													<= weight[(i +  1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					WR1[(j + (`WR_DEPTH_ROW / 2)) * `WR_DEPTH_COL + i]							<= weight[(i +  9) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					WR1[j * `WR_DEPTH_COL + i + (`WR_DEPTH_COL / 2)]							<= weight[(i + 17) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+					WR1[(j + (`WR_DEPTH_ROW / 2)) * `WR_DEPTH_COL + i + (`WR_DEPTH_COL / 2)]	<= weight[(i + 25) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+				end
+		end
+		default: begin
+			for(i = 0; i < `WR_DEPTH; i = i + 1) begin
+				WR1[i]		<= WR1[i];
+			end
+		end
+	endcase
+end
+
+always @(posedge clk) begin
+	case(net_type_reg)
+		2'b00:		load_WR2		<= (inwreb_16_reg_reg == 4'd7) ? 1'b1 : 1'b0;
+		2'b01:		load_WR2		<= weight_bias_en_reg_reg;
+		default:	load_WR2		<= 1'b0;
+	endcase
+end
+
+always @(posedge clk) begin
+	if(load_WR2) begin
+		for(i = 0; i < `WR_DEPTH; i = i + 1) begin
+			WR2[i]		<= WR1[i];
+		end
+	end
+	else begin
+		for(i = 0; i < `WR_DEPTH; i = i + 1) begin
+			WR2[i]		<= `DATA_WIDTH 'b0;
+		end
+	end
+end
+//****************************************************************************************************
+
+//psum
+//****************************************************************************************************
+always @(posedge clk) begin
+	if(psum_en_reg_reg) begin
+		for(j = 0; j < `WR_DEPTH_ROW; j = j + 1) begin
+			for(i = 0; i < `WR_DEPTH_COL - 1; i = i + 1) begin
+				PR1[j * `WR_DEPTH_COL + i]		<= PR1[j * `WR_DEPTH_COL + i + 1];
+			end
+			PR1[(j + 1) * `WR_DEPTH_COL - 1]	<= psum_data[(j + 1) * `PBUF_DATAB_WIDTH - 1 -: `PBUF_DATAB_WIDTH];
+		end
+	end
+	else begin
+		for(i = 0; i < `WR_DEPTH; i = i + 1)
+			PR1[i]								<= PR1[i];
+	end
+end
+
+always @(posedge clk) begin
+	if(psum_en_reg_reg_reg) begin
+		for(i = 0; i < `WR_DEPTH_COL; i = i + 1)
+			for(j = 0; j < `WR_DEPTH_ROW; j = j + 1) begin
+				PR2[j * `WR_DEPTH_COL + i]			<= PR1[j * `WR_DEPTH_COL + i];
+			end
+	end
+	else begin
+		for(i = 0; i < `WR_DEPTH; i = i + 1)
+			PR2[i]									<= PR2[i];
+	end
+end
+//****************************************************************************************************
+
+//output register
+//****************************************************************************************************
+always @(posedge clk) begin
+	if(sel_reg_reg_reg == 8'b00010000)
+		load_OR		<= 2'b01;
+	else if((sel_reg_reg_reg == 8'b00000000) & ((sel_reg_reg == 8'b10011011) | (sel_reg_reg == 8'b00111011)))
+		load_OR		<= 2'b10;
+	else
+		load_OR		<= 2'b00;
+end
+
+always @(posedge clk) begin
+	for(i = 0; i < `WR_DEPTH_ROW; i = i + 1)
+		for(j = 0; j < `WR_DEPTH_COL; j = j + 1) begin
+			case(load_OR)
+				2'b01:		OR[i * `WR_DEPTH_COL + j]	<= PE_out_data[i * `WR_DEPTH_COL + j];
+				2'b10:		OR[i * `WR_DEPTH_COL + j]	<= pooling_data[(i * `WR_DEPTH_COL + j + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+				default:	OR[i * `WR_DEPTH_COL + j]	<= OR[i * `WR_DEPTH_COL + j];
+			endcase
+		end
+end
+//****************************************************************************************************
+
+//X0
+//****************************************************************************************************
+always @(posedge clk) begin
+	for(i = 0; i < `WR_DEPTH_ROW; i = i + 1)
+		for(j = 0; j < `WR_DEPTH_COL; j = j + 1) begin
+			case(load_OR)
+				2'b01:		X0[i * `WR_DEPTH_COL + j]	<= PE_out_data[i * `WR_DEPTH_COL + j];
+				2'b10:		X0[i * `WR_DEPTH_COL + j]	<= pooling_data[(i * `WR_DEPTH_COL + j + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+				default:	X0[i * `WR_DEPTH_COL + j]	<= X0[i * `WR_DEPTH_COL + j];
+			endcase
+		end
+end
+//****************************************************************************************************
+
+//X1
+//****************************************************************************************************
+always @(posedge clk) begin
+	case(load_OR)
+		2'b01: begin
+			case(shift_dir_reg_reg)
+				2'b01: begin//left shift
+					for(i = 0; i < `WR_DEPTH_ROW; i = i + 1) begin
+						for(j = 0; j < `WR_DEPTH_COL - 1; j = j + 1) begin
+							if(j == pool_C_reg - 1'b1)
+								X1[i * `WR_DEPTH_COL + j]	<= pooling_type[1] ? `DATA_WIDTH 'h8000 : PE_out_data[i * `WR_DEPTH_COL + j];
+							else
+								X1[i * `WR_DEPTH_COL + j]	<= PE_out_data[i * `WR_DEPTH_COL + j + 1];
+						end
+						X1[(i + 1) * `WR_DEPTH_COL - 1]		<= pooling_type[1] ? `DATA_WIDTH 'h8000 : PE_out_data[i * `WR_DEPTH_COL + j];
+					end
+				end
+				2'b11: begin//up shift
+					for(j = 0; j < `WR_DEPTH_COL; j = j + 1) begin
+						for(i = 0; i < `WR_DEPTH_ROW - 1; i = i + 1) begin
+							if(i == pool_R_reg - 1'b1)
+								X1[i * `WR_DEPTH_COL + j]	<= pooling_type[1] ? `DATA_WIDTH 'h8000 : PE_out_data[i * `WR_DEPTH_COL + j];
+							else
+								X1[i * `WR_DEPTH_COL + j]	<= PE_out_data[(i + 1) * `WR_DEPTH_COL + j];
+						end
+						X1[(`WR_DEPTH_ROW - 1) * `WR_DEPTH_COL + j]	<= pooling_type[1] ? `DATA_WIDTH 'h8000 : PE_out_data[i * `WR_DEPTH_COL + j];
+					end
+				end
+				default: begin
+					for(i = 0; i < `WR_DEPTH; i = i + 1) begin
+						X1[i]		<= X1[i];//0???
+					end
+				end
+			endcase
+		end
+		2'b10: begin
+			case(shift_dir_reg_reg)
+				2'b01: begin//left shift
+					for(i = 0; i < `WR_DEPTH_ROW; i = i + 1) begin
+						for(j = 0; j < `WR_DEPTH_COL - 1; j = j + 1) begin
+							if(j == pool_C_reg - 1'b1)
+								X1[i * `WR_DEPTH_COL + j]	<= pooling_type[1] ? `DATA_WIDTH 'h8000 : pooling_data[(i * `WR_DEPTH_COL + j + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+							else
+								X1[i * `WR_DEPTH_COL + j]	<= pooling_data[(i * `WR_DEPTH_COL + j + 2) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+						end
+						X1[(i + 1) * `WR_DEPTH_COL - 1]		<= pooling_type[1] ? `DATA_WIDTH 'h8000 : pooling_data[(i * `WR_DEPTH_COL + j + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+					end
+				end
+				2'b11: begin//up shift
+					for(j = 0; j < `WR_DEPTH_COL; j = j + 1) begin
+						for(i = 0; i < `WR_DEPTH_ROW - 1; i = i + 1) begin
+							if(i == pool_R_reg - 1'b1)
+								X1[i * `WR_DEPTH_COL + j]	<= pooling_type[1] ? `DATA_WIDTH 'h8000 : pooling_data[(i * `WR_DEPTH_COL + j + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+							else
+								X1[i * `WR_DEPTH_COL + j]	<= pooling_data[((i + 1) * `WR_DEPTH_COL + j + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+						end
+						X1[(`WR_DEPTH_ROW - 1) * `WR_DEPTH_COL + j]	<= pooling_type[1] ? `DATA_WIDTH 'h8000 : pooling_data[(i * `WR_DEPTH_COL + j + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+					end
+				end
+				default: begin
+					for(i = 0; i < `WR_DEPTH; i = i + 1) begin
+						X1[i]		<= X1[i];//0???
+					end
+				end
+			endcase
+		end
+		default: begin
+			for(i = 0; i < `WR_DEPTH; i = i + 1) begin
+				X1[i]		<= X1[i];
+			end
+		end
+	endcase
+end
+//****************************************************************************************************
+
+//out_data
+//****************************************************************************************************
+always @(posedge clk) begin
+	if(outdata_en_reg_reg_reg) begin
+		if(pooling_type[2]) begin//pooling stride = 2
+			for(i = 0; i < 7; i = i + 1) begin
+				case(out_cnt_reg_reg_reg_reg)
+					5'd0:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 0 + 2 * i * `WR_DEPTH_COL];
+					5'd1:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 2 + 2 * i * `WR_DEPTH_COL];
+					5'd2:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 4 + 2 * i * `WR_DEPTH_COL];
+					5'd3:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 6 + 2 * i * `WR_DEPTH_COL];
+					5'd4:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 8 + 2 * i * `WR_DEPTH_COL];
+					5'd5:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[10 + 2 * i * `WR_DEPTH_COL];
+					5'd6:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[12 + 2 * i * `WR_DEPTH_COL];
+					5'd7:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[14 + 2 * i * `WR_DEPTH_COL];
+					default:	out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= `OUTBUF_DATAA_WIDTH 'b0;
+				endcase
+			end
+		end
+		else begin
+			for(i = 0; i < `WR_DEPTH_ROW; i = i + 1) begin
+				case(out_cnt_reg_reg_reg_reg)
+					5'd0:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 0 + i * `WR_DEPTH_COL];
+					5'd1:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 1 + i * `WR_DEPTH_COL];
+					5'd2:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 2 + i * `WR_DEPTH_COL];
+					5'd3:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 3 + i * `WR_DEPTH_COL];
+					5'd4:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 4 + i * `WR_DEPTH_COL];
+					5'd5:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 5 + i * `WR_DEPTH_COL];
+					5'd6:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 6 + i * `WR_DEPTH_COL];
+					5'd7:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 7 + i * `WR_DEPTH_COL];
+					5'd8:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 8 + i * `WR_DEPTH_COL];
+					5'd9:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[ 9 + i * `WR_DEPTH_COL];
+					5'd10:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[10 + i * `WR_DEPTH_COL];
+					5'd11:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[11 + i * `WR_DEPTH_COL];
+					5'd12:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[12 + i * `WR_DEPTH_COL];
+					5'd13:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[13 + i * `WR_DEPTH_COL];
+					5'd14:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[14 + i * `WR_DEPTH_COL];
+					5'd15:		out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= OR[15 + i * `WR_DEPTH_COL];
+					default:	out_data[(i + 1) * `OUTBUF_DATAA_WIDTH - 1 -: `OUTBUF_DATAA_WIDTH]	<= `OUTBUF_DATAA_WIDTH 'b0;
+				endcase
+			end
+		end
+	end
+	else begin
+		out_data		<= `WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH 'b0;
+	end
+end
+//****************************************************************************************************
+
+//shift_num
+//****************************************************************************************************
+always @(posedge clk) begin
+	case({sel_reg_reg_reg})
+		8'b00000101:		shift_num	= regular_shift_num;	//regularization
+		8'b01000101:		shift_num	= `LEAKY_SHIFT_NUM;		//LEAKT RELU
+		8'b00010101:		shift_num	= conv_shift_num;		//CONV
+		8'b10011011:		shift_num	= `SHIFT_WIDTH 'b1;		//MEAN_POOL
+		default:	shift_num	= `SHIFT_WIDTH 'b0;
+	endcase
+end
+
+always @(posedge clk) begin
+	for(i = 0; i < `WR_DEPTH_ROW; i = i + 1) begin
+		shift_num_reg[i]		<= shift_num;
+	end
+end
+//****************************************************************************************************
+
+//sel
+//****************************************************************************************************
+always @(posedge clk) begin
+	sel_reg							<= sel;
+	sel_reg_reg						<= sel_reg;
+	sel_reg_reg_reg					<= sel_reg_reg;
+	for(i = 0; i < `WR_DEPTH_ROW; i = i + 1)
+		sel_reg_reg_reg_reg[i]		<= sel_reg_reg_reg;
+end
+//****************************************************************************************************
+
+//relu6_6
+//****************************************************************************************************
+always @(posedge clk) begin// relu6_6
+	for(i = 0; i < `WR_DEPTH_ROW; i = i + 1)
+		relu6_6[i]					<= 3'd6 << qval_reg;
+	for(i = 0; i < `WR_DEPTH_ROW; i = i + 1) begin
+		for(j = 0; j < `WR_DEPTH_COL; j = j + 1)
+			relu6_6_reg[i * `WR_DEPTH_COL + j]		<= relu6_6[i];
+	end
+end
+//****************************************************************************************************
+
+//PE array
+//****************************************************************************************************
+genvar m, n;
+generate
+	for(m = 0; m < `WR_DEPTH_ROW; m = m + 1) begin :PE_m
+		for(n = 0; n < `WR_DEPTH_COL; n = n + 1) begin :PE_n
+			PE PE_ins(
+				.clk(clk),
+				.rst(rst),	//rst == 1 -> RESET
+				.in_data(dsh[(m * `WR_DEPTH_COL + n + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH]),
+				.weight(WR2[m * `WR_DEPTH_COL + n]),
+				.psum(PR2[m * `WR_DEPTH_COL + n]),
+				.X0(X0[m * `WR_DEPTH_COL + n]),
+				.X1(X1[m * `WR_DEPTH_COL + n]),
+				.relu6_6(relu6_6_reg[m * `WR_DEPTH_COL + n]),
+				.sel(sel_reg_reg_reg_reg[m]),
+				.shift_num(shift_num_reg[m]),
+				.out_data(PE_out_data[m * `WR_DEPTH_COL + n])
+			);
+		end
+	end
+endgenerate
+//****************************************************************************************************
+
+endmodule
