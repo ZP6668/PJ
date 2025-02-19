@@ -1,0 +1,221 @@
+//`include "E:/code/vivado2018/MAC_20.1.6/MAC_DSP_6.10/cnn_parameter.v"
+`timescale 1ns/100ps
+
+module convcore_top(
+	input														clk,
+	input														rst,
+	input														conv_start,
+	output														conv_finish,
+	
+	input	[1:0]												net_type,
+	input														conv_stride,
+	input														bias_type,
+	input														psum_type,
+	input														regular_type,
+	input	[2:0]												act_type,
+	input	[2:0]												pooling_type,
+	input														out_type,
+	input	[4:0]												qval,
+	
+	input	[`SHIFT_WIDTH - 1 : 0]								conv_shift_num,
+	input	[`SHIFT_WIDTH - 1 : 0]								regular_shift_num,
+	
+	input	[2:0]												tk,
+	input	[`TILING_Tn_WIDTH - 1 : 0]							tn,
+	input	[`TILING_tm_WIDTH - 1 : 0]							tm,
+	input	[`INBUF_Tl_WIDTH - 1 : 0]							tl,
+	input	[`TILING_COL_WIDTH - 1 : 0]							tiling_col,
+	input	[3:0]												pool_tc,
+	input	[`TILING_LOOP_R_WIDTH - 1 : 0]						loop_R,
+	input	[`TILING_LOOP_C_WIDTH - 1 : 0]						loop_C,
+	input	[3:0]												pool_R,
+	
+	input	[`INBUF_ADDRB_WIDTH - 1 : 0]						indata_addr_offset,
+	input	[`INBUF_RAM_ROW * `INBUF_DATAB_WIDTH - 1 : 0]		in_data,
+	output														indata_en_BRAM,
+	output	[`INBUF_ADDRB_WIDTH - 1 : 0]						indata_addr,
+	
+	input	[`BIAS_OFFSET_WIDTH - 1 : 0]						bias_addr_offset,
+	input	[`WBUF_DATAB_WIDTH - 1 : 0]							weight0,
+	output														weight_bias_en_BRAM,
+	output	[`WBUF_ADDRB_WIDTH - 1 : 0]							weight_bias_addr,
+	
+	input	[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH - 1 : 0]			psum_data0,
+	output														psum_en_BRAM,
+	output	[`PBUF_ADDRB_WIDTH - 1 : 0]							psum_addr,
+	
+	input	[`WBUF_DATAB_WIDTH - 1 : 0]							weight1,
+	input	[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH - 1 : 0]			psum_data1,
+	output	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 : 0]		out_data1,
+	
+	input	[`WBUF_DATAB_WIDTH - 1 : 0]							weight2,
+	input	[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH - 1 : 0]			psum_data2,
+	output	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 : 0]		out_data2,
+	
+	input	[`WBUF_DATAB_WIDTH - 1 : 0]							weight3,
+	input	[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH - 1 : 0]			psum_data3,
+	output	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 : 0]		out_data3,
+	
+	input	[`MAC_OUTDDRA_WIDTH - 1 : 0]						outdata_addr_offset,
+	output														outdata_en_BRAM,
+	output	[`MAC_OUTDDRA_WIDTH - 1 : 0]						outdata_addr_BRAM,
+	output	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 :0 ]		out_data0
+);
+
+//wire
+//****************************************************************************************************
+wire		[7:0]							sel;
+wire		[1:0]							shift_dir;
+wire		[1:0]							conv_type;
+
+wire		[4:0]							pool_C;
+
+wire		[3:0]							inw1_cnt;
+wire		[4:0]							inw2_cnt;
+wire		[3:0]							inwreb_16;
+
+wire										indata_en;
+wire										weight_bias_en;
+wire										psum_en;
+
+wire		[4:0]							out_cnt;
+
+wire										outdata_en;
+wire		[`MAC_OUTDDRA_WIDTH - 1 : 0]	outdata_addr;
+//****************************************************************************************************
+
+//check inout
+//****************************************************************************************************
+wire	[`DATA_WIDTH - 1 : 0]			in_data_[19 : 0];
+wire	[`WEIGHT_WIDTH - 1 : 0]			weight0_[31 : 0];
+wire	[`DATA_WIDTH - 1 : 0]			psum_data0_[13 : 0];
+wire	[`DATA_WIDTH - 1 : 0]			out_data0_[13 : 0];
+genvar i;
+generate
+	for(i = 0; i < 20; i = i + 1) begin
+		assign		in_data_[i]			= in_data[(i + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+	end
+	for(i = 0; i < 32; i = i + 1) begin
+		assign		weight0_[i]			= weight0[(i + 1) * `WEIGHT_WIDTH - 1 -: `WEIGHT_WIDTH];
+	end
+	for(i = 0; i < 14; i = i + 1) begin
+		assign		psum_data0_[i]		= psum_data0[(i + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+		assign		out_data0_[i]		= out_data0[(i + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+	end
+endgenerate
+//****************************************************************************************************
+
+//convcore
+//****************************************************************************************************
+convcore convcore_ins(      //例化convcore
+	.clk(clk),
+	.rst(rst),
+	
+	.net_type(net_type),
+	.conv_stride(conv_stride),
+	.conv_shift_num(conv_shift_num),
+	.regular_shift_num(regular_shift_num),
+	.pooling_type(pooling_type),
+	.out_type(out_type),
+	
+	.tk(tk),
+	.tiling_col(tiling_col),
+	.pool_tc(pool_tc),
+	
+	.sel(sel),
+	.shift_dir(shift_dir),
+	.conv_type(conv_type),
+	.qval(qval),
+	
+	.pool_R(pool_R),
+	.pool_C(pool_C),
+	
+	.indata_en(indata_en),
+	.in_data(in_data),
+	
+	.weight_bias_en(weight_bias_en),
+	.inw1_cnt(inw1_cnt),
+	.inw2_cnt(inw2_cnt),
+	.inwreb_16(inwreb_16),
+	.weight0(weight0),
+	
+	.psum_en(psum_en),
+	.psum_data0(psum_data0),
+	
+	.weight1(weight1),
+	.psum_data1(psum_data1),
+	.out_data1(out_data1),
+	
+	.weight2(weight2),
+	.psum_data2(psum_data2),
+	.out_data2(out_data2),
+	
+	.weight3(weight3),
+	.psum_data3(psum_data3),
+	.out_data3(out_data3),
+	
+	.outdata_en(outdata_en),
+	.out_cnt(out_cnt),
+	.out_data0(out_data0)
+);
+//****************************************************************************************************
+
+//control
+//****************************************************************************************************
+control control_ins(          //例化control
+	.clk(clk),
+	.rst(rst),
+	.conv_start(conv_start),
+	.conv_finish(conv_finish),
+	
+	.net_type(net_type),
+	.conv_stride(conv_stride),
+	.bias_type(bias_type),
+	.psum_type(psum_type),
+	.regular_type(regular_type),
+	.act_type(act_type),
+	.pooling_type(pooling_type),
+	.out_type(out_type),
+	
+	.tk(tk),
+	.tn(tn),
+	.tm(tm),
+	.tl(tl),
+	.tiling_col(tiling_col),
+	.pool_tc(pool_tc),
+	.loop_R(loop_R),
+	.loop_C(loop_C),
+	
+	.pool_C(pool_C),
+	
+	.sel(sel),
+	.shift_dir(shift_dir),
+	.conv_type(conv_type),
+	
+	.indata_addr_offset(indata_addr_offset),
+	.indata_en(indata_en),
+	.indata_en_BRAM(indata_en_BRAM),
+	.indata_addr(indata_addr),
+	
+	.bias_addr_offset(bias_addr_offset),
+	.weight_bias_en(weight_bias_en),
+	.weight_bias_en_BRAM(weight_bias_en_BRAM),
+	.inw1_cnt(inw1_cnt),
+	.inw2_cnt(inw2_cnt),
+	.inwreb_16(inwreb_16),
+	.weight_bias_addr(weight_bias_addr),
+	
+	.psum_en(psum_en),
+	.psum_en_BRAM(psum_en_BRAM),
+	.psum_addr(psum_addr),
+	
+	.outdata_addr_offset(outdata_addr_offset),
+	.outdata_en(outdata_en),
+	.out_cnt(out_cnt),
+	.outdata_addr(outdata_addr),
+	.outdata_en_BRAM(outdata_en_BRAM),
+	.outdata_addr_BRAM(outdata_addr_BRAM)
+);
+//****************************************************************************************************
+
+endmodule
