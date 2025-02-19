@@ -1,0 +1,83 @@
+//2019.9.24 16bit
+//`define TwoMAC
+//`define ThreeMAC
+//`define FourMAC
+`define	MAC_NUM	2
+`define    SIMULATION 0
+
+/* global macro */
+`define DATA_WIDTH 16
+`define WEIGHT_WIDTH 16
+
+/* AXI */
+`define AXI_WIDTH 16 //just mean the fifo port that connected to BRAM,the real axi_width equals 32
+
+/* MAC */
+`define IR1_DEPTH_ROW 20
+`define IR2_DEPTH_ROW 26
+`define IR1_DEPTH_COL 16
+`define IR2_DEPTH_COL 22
+`define WR_DEPTH_ROW 14  //row size of PE-array   OR_DEPTH_ROW,BR_DEPTH_ROW
+`define WR_DEPTH_COL 16  
+`define WR_DEPTH `WR_DEPTH_ROW*`WR_DEPTH_COL//size of PE-array ;OR_DEPTH,BR_DEPTH
+`define IR1_IR2_ROW `IR2_DEPTH_ROW-`IR1_DEPTH_ROW
+`define IR1_IR2_COL `IR2_DEPTH_COL-`IR1_DEPTH_COL
+`define IR1_DEPTH `IR1_DEPTH_ROW*`IR1_DEPTH_COL
+`define IR2_DEPTH `IR2_DEPTH_ROW*`IR2_DEPTH_COL
+`define NUM_ADDR_WBUF 8//4:1 inwaddr read 16 weights(32bit);   8:1 inwaddr read 32 weights(16bit)
+`define MAC_OUTDDRA_WIDTH 12
+`define SHIFT_WIDTH 4 //width of conv_shift_num and regular_shift_num
+`define LEAKY_SHIFT_NUM 15
+`define BIAS_OFFSET_WIDTH 9  // width of bias_addr_offset
+`define TILING_tm_WIDTH 10  // width of tm
+`define TILING_Tn_WIDTH 10  // width of Tn
+`define TILING_COL_WIDTH 5  // width of tiling_col;only pool=16
+
+`define TILING_TM_WIDTH 10
+`define TILING_tr_WIDTH 5
+`define TILING_PAD_WIDTH 2
+
+
+`define CONV_C 16
+`define POOL_TC 13	// =pool_tc, col after pooling/(2*2,s=1);/in yolo =13; /3*3,s=2:=15
+//`define POOLING_C 8 // 2*2 pooling stride=2; 7 : 3*3 stride=2,13:2*2,s=1
+`define LEAKY 3276
+
+
+`define TILING_TR_WIDTH 5 //Tr
+`define TILING_TC_WIDTH 9 //Tc
+`define TILING_LOOP_R_WIDTH  5
+`define TILING_LOOP_C_WIDTH  9
+
+/* Weight buffer */
+`define WBUF_BIAS_START 235 //bias starts in WBuf, 236/493 addr ping-pong
+`define WBUF_ADDRA_WIDTH 13
+`define WBUF_DATAA_WIDTH 32
+`define WBUF_ADDRB_WIDTH 9
+`define WBUF_DATAB_WIDTH 32*`WEIGHT_WIDTH
+`define WBUF_DATAA_DEPTH 8192
+/* input buffer */
+`define INBUF_RAM_ROW `IR1_DEPTH_ROW
+`define INBUF_ADDRA_WIDTH 11
+`define INBUF_DATAA_WIDTH `AXI_WIDTH
+`define INBUF_ADDRB_WIDTH 11
+`define INBUF_DATAB_WIDTH `DATA_WIDTH
+`define INBUF_Tl_WIDTH 9  //Tl
+
+/* partial sum buffer */
+`define PBUF_RAM_ROW `WR_DEPTH_ROW
+`define PBUF_ADDRA_WIDTH 12
+`define PBUF_DATAA_WIDTH `AXI_WIDTH
+`define PBUF_ADDRB_WIDTH 12
+`define PBUF_DATAB_WIDTH `DATA_WIDTH
+`define PBUF_RAM_DEPTH   (1<<`PBUF_ADDRB_WIDTH)
+/* output buffer */
+`define OUTBUF_RAM_ROW `WR_DEPTH_ROW
+`define OUTBUF_ADDRA_WIDTH 11
+`define OUTBUF_DATAA_WIDTH `DATA_WIDTH
+`define OUTBUF_ADDRB_WIDTH 11
+`define OUTBUF_DATAB_WIDTH `AXI_WIDTH
+`define OUTBUF_INVALIDE_COL_WIDTH 2
+`define OUTBUF_DATA_DEPTH  2048
+
+
