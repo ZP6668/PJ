@@ -1,0 +1,833 @@
+//`include "E:/code/vivado2018/MAC_20.1.6/MAC_DSP_6.10/cnn_parameter.v"
+`timescale 1ns/100ps
+
+module control(
+	input											clk,
+	input											rst,
+	input											conv_start,
+	output	reg										conv_finish,
+	
+	input		[1:0]								net_type,			// 01: convolution , 0: full connection; 10: only pooling
+	input											conv_stride,		// 1:conv_stride=1 ;0:conv_stride=2
+	input											bias_type,			// 0:none, 1:bias
+	input											psum_type,			// 0:none, 1:intermediate sum
+	input											regular_type,		// 0:none, 1:regularization
+	input		[2:0]								act_type,			// activation function 0:none, 3'b001:ReLU, 3'b010:LeakyReLU, 3'b011:sigmoid. 3'b100 RELU6
+	input		[2:0]								pooling_type,		// pooling_type
+	input											out_type,			// 0:intermediate sum,  1:output feature map
+	
+	input		[2:0]								tk,					// kernel size
+	input		[`TILING_Tn_WIDTH - 1 : 0]			tn,					// input tiling channel number,Tn<=1023
+	input		[`TILING_tm_WIDTH - 1 : 0]			tm,					// output tiling channel number,tm<=1023
+	input		[`INBUF_Tl_WIDTH - 1 : 0]			tl,					// ifmap address, <=1024
+	input		[`TILING_COL_WIDTH - 1 : 0]			tiling_col,			// col of input tiling feature,tiling_col<=16;stride=2: tiling_col=tk
+	input		[3:0]								pool_tc,			// 8:2*2 pooling stride=2; 7:3*3 stride=2,13:2*2,s=1;/col of ofmap after pooling, <=1024 Tc
+	input		[`TILING_LOOP_R_WIDTH - 1 : 0]		loop_R,				// a ceiling function of (R/tr)
+	input		[`TILING_LOOP_C_WIDTH - 1 : 0]		loop_C,				// output feature map width, tk=1: =outaddr_offset
+	
+	output	reg	[4:0]								pool_C,
+	
+	output	reg	[7:0]								sel,
+	output	reg	[1:0]								shift_dir,			// shift direction of IR1 reg array 000:none, 001:left,  011:up,  010:right, 110:down
+	output	reg	[1:0]								conv_type,
+	
+	input		[`INBUF_ADDRB_WIDTH - 1 : 0]		indata_addr_offset,	// ifmap address distance among adjacent channels, <=1024 
+	output	reg										indata_en,
+	output	reg										indata_en_BRAM,
+	output	reg	[`INBUF_ADDRB_WIDTH - 1 : 0]		indata_addr,
+	
+	input		[`BIAS_OFFSET_WIDTH - 1 : 0]		bias_addr_offset,	// addr begins for bias
+	output	reg										weight_bias_en,
+	output	reg										weight_bias_en_BRAM,
+	output	reg	[3:0]								inw1_cnt,			// <=14 //count for row of weight,tk;0<=cnt_inw1<=14,0<=cnt_inw2<=14
+	output	reg	[4:0]								inw2_cnt,			// <=16 //count for column of weight,tk;
+	output	reg	[3:0]								inwreb_16,			// read weight,bias 16-bit each time form 128-bit
+	output	reg	[`WBUF_ADDRB_WIDTH - 1 : 0]			weight_bias_addr,	// inwaddr_reg,inbaddr
+	
+	output	reg										psum_en,
+	output	reg										psum_en_BRAM,
+	output	reg	[`PBUF_ADDRB_WIDTH - 1 : 0]			psum_addr,
+	
+	input		[`MAC_OUTDDRA_WIDTH - 1 : 0]		outdata_addr_offset,// pooling ofmap address distance among adjacent channels, <=1024
+	output	reg										outdata_en,
+	output	reg	[4:0]								out_cnt,			// count for row of output,tr,conv_c;0<=cnt_out<=15
+	output	reg	[`MAC_OUTDDRA_WIDTH - 1 : 0]		outdata_addr,
+	output	reg										outdata_en_BRAM,
+	output	reg	[`MAC_OUTDDRA_WIDTH - 1 : 0]		outdata_addr_BRAM
+);
+
+//FSM state
+//****************************************************************************************************
+localparam		IDLE			=  0,
+				CONV_LOOP		=  1,
+				CONV_TRANSFER	=  2,
+				CONV1			=  3,
+				CONV2			=  4,
+				CONV3			=  5,
+				CONV_HOLD		=  6,
+				CONV_PSUM		=  7,
+				CONV_BIAS		=  8,
+				CONV_REGULAR	=  9,
+				CONV_ACTFUN		= 10,
+				CONV_ORMAP		= 11,
+				CONV_LAST		= 12,
+				
+				POOL_LOOP		= 13,
+				POOL_TRANSFER	= 14,
+				POOL			= 15,
+				POOL_ORMAP		= 16,
+				POOL_LAST		= 17,
+				
+				FC_TRANSFER		= 18,
+				FC				= 19,
+				FC_HOLD			= 20,
+				FC_PSUM			= 21,
+				FC_ORMAP		= 22,
+				FC_LAST			= 23,
+				
+				FINISH			= 24;
+//****************************************************************************************************
+
+//****************************************************************************************************
+reg		[4:0]								state;
+reg		[4:0]								next_state;
+
+reg											conv_start_reg;
+
+reg		[1:0]								net_type_reg;
+reg											conv_stride_reg;
+reg											bias_type_reg;
+reg											psum_type_reg;
+reg											regular_type_reg;
+reg		[2:0]								act_type_reg;
+reg		[2:0]								pooling_type_reg;
+reg											out_type_reg;
+
+reg		[2:0]								tk_reg;
+reg		[`TILING_Tn_WIDTH - 1 : 0]			tn_reg;
+reg		[`TILING_tm_WIDTH - 1 : 0]			tm_reg;
+reg		[`INBUF_Tl_WIDTH - 1 : 0]			tl_reg;
+reg		[`TILING_COL_WIDTH - 1 : 0]			tiling_col_reg;
+reg		[3:0]								pool_tc_reg;
+reg		[`TILING_LOOP_R_WIDTH - 1 : 0]		loop_R_reg;
+reg		[`TILING_LOOP_C_WIDTH - 1 : 0]		loop_C_reg;
+
+reg		[4:0]								pool_C_tmp;
+
+reg		[`INBUF_ADDRB_WIDTH - 1 : 0]		indata_addr_offset_reg;
+reg		[`BIAS_OFFSET_WIDTH - 1 : 0]		bias_addr_offset_reg;
+reg		[`MAC_OUTDDRA_WIDTH - 1 : 0]		outdata_addr_offset_reg;
+
+reg		[`TILING_LOOP_R_WIDTH - 1 : 0]		loop_R_cnt;
+reg		[`TILING_LOOP_C_WIDTH - 1 : 0]		loop_C_cnt;
+reg		[`TILING_Tn_WIDTH - 1 : 0]			tn_cnt;
+reg		[`TILING_tm_WIDTH - 1 : 0]			tm_cnt;
+reg		[`TILING_COL_WIDTH - 1 : 0]			indata_cnt;
+reg		[3:0]								clk_cnt;
+reg		[4:0]								psum_cnt;
+
+reg											indata_en_reg;
+reg											indata_en_reg_reg;
+reg											weight_bias_en_reg;
+reg											weight_bias_en_reg_reg;
+reg											psum_en_reg;
+reg											psum_en_reg_reg;
+
+reg		[`INBUF_ADDRB_WIDTH - 1 : 0]		indata_addr_start;
+reg		[`INBUF_ADDRB_WIDTH - 1 : 0]		tiling_indata_addr_offset;
+reg											inweight_en;
+reg											inbias_en;
+reg		[`WBUF_ADDRB_WIDTH - 1 : 0]			inweight_addr;
+reg		[`WBUF_ADDRB_WIDTH - 1 : 0]			inbias_addr;
+reg		[`MAC_OUTDDRA_WIDTH - 1 : 0]		outdata_addr_start;
+reg		[`MAC_OUTDDRA_WIDTH - 1 : 0]		pooling_outdata_addr_offset;
+
+reg											outdata_en_reg;
+reg											outdata_en_reg_reg;
+reg											outdata_en_reg_reg_reg;
+reg											outdata_en_reg_reg_reg_reg;
+reg											outdata_en_reg_reg_reg_reg_reg;
+reg	[`MAC_OUTDDRA_WIDTH - 1 : 0]			outdata_addr_reg;
+reg	[`MAC_OUTDDRA_WIDTH - 1 : 0]			outdata_addr_reg_reg;
+reg	[`MAC_OUTDDRA_WIDTH - 1 : 0]			outdata_addr_reg_reg_reg;
+reg	[`MAC_OUTDDRA_WIDTH - 1 : 0]			outdata_addr_reg_reg_reg_reg;
+reg	[`MAC_OUTDDRA_WIDTH - 1 : 0]			outdata_addr_reg_reg_reg_reg_reg;
+
+reg											finish;
+reg											finish_reg;
+reg											finish_reg_reg;
+reg											finish_reg_reg_reg;
+reg											finish_reg_reg_reg_reg;
+reg											finish_reg_reg_reg_reg_reg;
+
+reg											jump_mac;
+reg											keep_inout;
+wire	[`INBUF_Tl_WIDTH - 1 : 0]			remain;
+reg		[`INBUF_Tl_WIDTH - 1 : 0]			remain_reg;
+//****************************************************************************************************
+
+//configuration register
+//****************************************************************************************************
+assign	remain					 = tl - tiling_col;
+
+always @(posedge clk) begin
+	conv_start_reg				<= conv_start;
+	
+	net_type_reg				<= net_type;
+	conv_stride_reg				<= conv_stride;
+	bias_type_reg				<= bias_type;
+	psum_type_reg				<= psum_type;
+	regular_type_reg			<= regular_type;
+	act_type_reg				<= act_type;
+	out_type_reg				<= out_type;
+	
+	tk_reg						<= tk;
+	tn_reg						<= tn;
+	tm_reg						<= tm;
+	tl_reg						<= tl;
+	tiling_col_reg				<= tiling_col;
+	pool_tc_reg					<= pool_tc;
+	loop_R_reg					<= loop_R;
+	loop_C_reg					<= loop_C;
+	
+	indata_en_reg				<= indata_en;
+	indata_en_reg_reg			<= indata_en_reg;
+	weight_bias_en_reg			<= weight_bias_en;
+	weight_bias_en_reg_reg		<= weight_bias_en_reg;
+	psum_en_reg					<= psum_en;
+	psum_en_reg_reg				<= psum_en_reg;	
+	
+	indata_addr_offset_reg		<= indata_addr_offset;
+	bias_addr_offset_reg		<= bias_addr_offset;
+	outdata_addr_offset_reg		<= outdata_addr_offset;
+	
+	outdata_en_reg						<= outdata_en;
+	outdata_en_reg_reg					<= outdata_en_reg;
+	outdata_en_reg_reg_reg				<= outdata_en_reg_reg;
+	outdata_en_reg_reg_reg_reg			<= outdata_en_reg_reg_reg;
+	outdata_en_reg_reg_reg_reg_reg		<= outdata_en_reg_reg_reg_reg;
+	outdata_addr_reg					<= outdata_addr;
+	outdata_addr_reg_reg				<= outdata_addr_reg;
+	outdata_addr_reg_reg_reg			<= outdata_addr_reg_reg;
+	outdata_addr_reg_reg_reg_reg		<= outdata_addr_reg_reg_reg;
+	outdata_addr_reg_reg_reg_reg_reg	<= outdata_addr_reg_reg_reg_reg;
+	
+	finish_reg							<= finish;
+	finish_reg_reg						<= finish_reg;
+	finish_reg_reg_reg					<= finish_reg_reg;
+	finish_reg_reg_reg_reg				<= finish_reg_reg_reg;
+	finish_reg_reg_reg_reg_reg			<= finish_reg_reg_reg_reg;
+	
+	remain_reg					<= remain;
+end
+//****************************************************************************************************
+
+//convolution type
+//****************************************************************************************************
+always @(posedge clk) begin
+	if((outdata_addr_offset == `MAC_OUTDDRA_WIDTH 'd7) && (conv_stride == 1'b1))
+		conv_type						<= 2'b11;	// R=C=7, stride = 1
+	else begin
+		case({conv_stride, tk})
+			{1'b1, 3'd1},							//tk = 1, stride = 1
+			{1'b1, 3'd2}:	conv_type	<= 2'b00;	//tk = 2, stride = 1
+			{1'b1, 3'd3},							//tk = 3, stride = 1
+			{1'b1, 3'd5},							//tk = 5, stride = 1
+			{1'b1, 3'd7}:	conv_type	<= 2'b01;	//tk = 7, stride = 1
+			default:		conv_type	<= 2'b10;	//tk = 1,2,3,5,7 stride = 2
+													//R=C=7, stride = 2
+		endcase
+	end
+end
+//****************************************************************************************************
+
+//pooling type
+//****************************************************************************************************
+always @(posedge clk) begin
+	case(pooling_type)
+		3'b001,										//2*2 mean pooling, stride=1
+		3'b010:		pooling_type_reg	<= 2'b01;	//2*2 max pooling, stride=1
+		3'b101,										//2*2 mean pooling, stride=2
+		3'b110:		pooling_type_reg	<= 2'b10;	//2*2 max pooling, stride=2
+		3'b111:		pooling_type_reg	<= 2'b11;	//3*3 max pooling, stride=2
+		default:	pooling_type_reg	<= 2'b00;	//no pooling
+	endcase
+end
+//****************************************************************************************************
+
+//pool_C
+//****************************************************************************************************
+always @(posedge clk) begin
+	case(next_state)
+		IDLE:		pool_C_tmp		<= 5'd0;
+		default:	pool_C_tmp		<= ((tn_cnt == 1'b0) &(loop_R_cnt == 1'b1) & (loop_C_cnt == loop_C_reg)) ? indata_addr_offset_reg - indata_addr_start : pool_C_tmp;
+	endcase
+end
+always @(posedge clk) begin
+	case(net_type_reg)
+		2'b00:		pool_C		<= 5'b0;
+		2'b01:		pool_C		<= 5'd16;	//noly tk = 3, 5, 7  stride = 1 can pooling after convolution
+		2'b10:		pool_C		<= (loop_C_cnt == loop_C_reg) ? pool_C_tmp : tiling_col_reg;
+		default:	pool_C		<= 5'b0;
+	endcase
+end
+//****************************************************************************************************
+
+//weight &bias & outdata enable signal and address
+//****************************************************************************************************
+always @(*) begin
+	if(inweight_en) begin
+		weight_bias_en			= inweight_en;
+		weight_bias_addr		= inweight_addr;
+	end
+	else if(inbias_en) begin
+		weight_bias_en			= inbias_en;
+		weight_bias_addr		= inbias_addr;
+	end
+	else begin
+		weight_bias_en			= 1'b0;
+		weight_bias_addr		= `WBUF_ADDRB_WIDTH 'b0;
+	end
+end
+always @(*) begin
+	weight_bias_en_BRAM			= weight_bias_en | weight_bias_en_reg | weight_bias_en_reg_reg;
+end
+
+always @(posedge clk) begin
+	outdata_en_BRAM			<= outdata_en_reg_reg_reg_reg_reg;
+	outdata_addr_BRAM		<= outdata_addr_reg_reg_reg_reg_reg;
+end
+//****************************************************************************************************
+
+//****************************************************************************************************
+always @(*) begin
+	case(state)
+		CONV_TRANSFER:	jump_mac	= (indata_cnt == tiling_col_reg);
+		CONV1,
+		CONV2,
+		CONV3:			jump_mac	= ((inw1_cnt == tk_reg - 1'b1) & (inw2_cnt == tk_reg));
+		
+		FC:				jump_mac	= ((inw1_cnt == 4'd13) & (inw2_cnt == 5'd5) & (inwreb_16 == 4'd7));
+
+		default:		jump_mac	= 1'b0;
+	endcase
+end
+
+always @(*) begin
+	case(state)
+		CONV1,
+		CONV2,
+		CONV3,
+		CONV_HOLD:		keep_inout	= (((psum_type_reg == 1'b0) | (psum_cnt == `CONV_C)) & ((out_cnt == `CONV_C) | ((pooling_type_reg[0] | pooling_type_reg[1]) & (out_cnt == pool_tc_reg)) | ((loop_R_cnt == 1'b1) & (loop_C_cnt == 1'b1) & (tm_cnt == 1'b1)))) ? 1'b0 : 1'b1;
+		default:		keep_inout	= 1'b0;
+	endcase
+end
+
+always @(posedge clk) begin
+	case(next_state)
+		FC_HOLD:		finish		<= ((clk_cnt[0] == 1'b0) & (tn_cnt != tn_reg)) ? 1'b1 : 1'b0;
+		FINISH:			finish		<= 1'b1;
+		default:		finish		<= 1'b0;
+	endcase
+end
+
+always @(posedge clk) begin
+	case(net_type_reg)
+		2'b00:			conv_finish		<= (next_state == FC_HOLD) ? conv_finish : finish_reg_reg_reg_reg_reg;
+		default:		conv_finish		<= finish_reg_reg_reg_reg_reg;
+	endcase
+end
+//****************************************************************************************************
+
+//counter
+//****************************************************************************************************
+always @(posedge clk) begin//clk_cnt
+	case(state)
+		IDLE:			clk_cnt		<= 4'b0;
+		CONV_HOLD:		clk_cnt		<= (clk_cnt[1] == 1'b0) ? clk_cnt + 4'd1 : (keep_inout ? clk_cnt : 4'b0);
+		CONV_PSUM,
+		CONV_BIAS:		clk_cnt		<= (clk_cnt[1] == 1'b0) ? clk_cnt + 4'd1 : 4'b0;
+		CONV_REGULAR,
+		CONV_ACTFUN:	clk_cnt		<= (clk_cnt[1:0] == 2'b11) ? 4'b0 : clk_cnt + 4'd1;
+		CONV_ORMAP:		clk_cnt		<= clk_cnt;
+		
+		POOL_TRANSFER:	clk_cnt		<= clk_cnt;
+		POOL:			clk_cnt		<= (clk_cnt == 4'd12) ? clk_cnt : clk_cnt + 1'b1;
+		POOL_ORMAP:		clk_cnt		<= clk_cnt;
+		
+		FC_HOLD:		clk_cnt		<= clk_cnt[0] ? clk_cnt : clk_cnt + 1'b1;
+		FC_PSUM:		clk_cnt		<= (clk_cnt[1:0] == 2'b11) ? 4'b0 : clk_cnt + 1'b1;
+		FC_ORMAP:		clk_cnt		<= clk_cnt[0] ? clk_cnt : clk_cnt + 1'b1;
+		
+		default:		clk_cnt		<= 4'b0;
+	endcase
+end
+
+always @(posedge clk) begin//loop_R_cnt
+	case(next_state)
+		IDLE:		loop_R_cnt		<= `TILING_LOOP_R_WIDTH 'd1;
+		CONV_LOOP:	loop_R_cnt		<= ((loop_C_cnt == loop_C_reg) & (tm_cnt == tm_reg)) ? loop_R_cnt + 1'b1 : loop_R_cnt;
+		
+		POOL_LOOP:	loop_R_cnt		<= (loop_C_cnt == loop_C_reg) ? ((loop_R_cnt == loop_R_reg) ? `TILING_LOOP_R_WIDTH 'd1 : loop_R_cnt + 1'b1) : loop_R_cnt;
+		
+		default:	loop_R_cnt		<= loop_R_cnt;
+	endcase
+end
+
+always @(posedge clk) begin//loop_C_cnt
+	case(next_state)
+		IDLE:		loop_C_cnt		<= (net_type_reg == 2'b01) ? `TILING_LOOP_C_WIDTH 'd1 : `TILING_LOOP_C_WIDTH 'd0;
+		CONV_LOOP:	loop_C_cnt		<= (tm_cnt == tm_reg) ? ((loop_C_cnt == loop_C_reg) ? `TILING_LOOP_C_WIDTH 'd1 : loop_C_cnt + 1'b1) : loop_C_cnt;
+		
+		POOL_LOOP:	loop_C_cnt		<= (loop_C_cnt == loop_C_reg) ? `TILING_LOOP_C_WIDTH 'd1 : loop_C_cnt + 1'b1;
+		
+		default:	loop_C_cnt		<= loop_C_cnt;
+	endcase
+end
+
+always @(posedge clk) begin//tm_cnt
+	case(next_state)
+		IDLE:		tm_cnt			<= `TILING_tm_WIDTH 'b0;
+		CONV_LOOP:	tm_cnt			<= (tm_cnt == tm_reg) ? `TILING_tm_WIDTH 'd1 : tm_cnt + 1'b1;
+		default:	tm_cnt			<= tm_cnt;
+	endcase
+end
+
+always @(posedge clk) begin//tn_cnt
+	case(next_state)
+		IDLE:		tn_cnt			<= `TILING_Tn_WIDTH 'b0;
+		CONV_LOOP:	tn_cnt			<= `TILING_Tn_WIDTH 'b0;
+		CONV1,
+		CONV2,
+		CONV3:		tn_cnt			<= jump_mac ? ((tn_cnt == tn_reg) ? tn_cnt : tn_cnt + 1'b1) : tn_cnt;
+		
+		POOL_LOOP:	tn_cnt			<= ((loop_R_cnt == loop_R_reg) & (loop_C_cnt == loop_C_reg)) ? tn_cnt + 1'b1 : tn_cnt;
+		
+		FC:			tn_cnt			<= (indata_cnt == 5'd5) ? tn_cnt + 1'b1 : tn_cnt;
+				
+		default:	tn_cnt			<= tn_cnt;
+	endcase
+end
+
+always @(posedge clk) begin//indata_cnt
+	case(next_state)
+		IDLE:			indata_cnt	<= 5'b0;
+		CONV_LOOP:		indata_cnt	<= 5'd0;
+		CONV_TRANSFER:	indata_cnt	<= (indata_cnt == tiling_col_reg) ? 5'd0 : indata_cnt + 1'b1;		//indata_cnt + 1'b1;
+		CONV1,
+		CONV2,
+		CONV3:			indata_cnt	<= jump_mac ? ((tn_cnt == tn_reg - 1'b1) ? indata_cnt : 5'd1) : ((indata_cnt == tiling_col_reg) ? indata_cnt : indata_cnt + 1'b1);
+		
+		POOL_TRANSFER:	indata_cnt	<= (indata_cnt == tiling_col_reg) ? 5'd0 : indata_cnt + 1'b1;
+		
+		FC_TRANSFER:	indata_cnt	<= (indata_cnt == tiling_col_reg) ? 5'd0 : indata_cnt + 1'b1;
+		
+		default:		indata_cnt	<= 5'b0;
+	endcase
+end
+
+always @(posedge clk) begin//inw1_cnt
+	case(next_state)
+		IDLE,
+		CONV_LOOP:		inw1_cnt	<= 4'b0;
+		CONV1,
+		CONV2,
+		CONV3:			inw1_cnt	<= jump_mac ? ((tn_cnt == tn_reg) ? inw1_cnt : 4'b0) : ((inw2_cnt == tk_reg) ? inw1_cnt + 1'b1 : inw1_cnt);
+		
+		FC_TRANSFER:	inw1_cnt	<= 4'd0;
+		FC:				inw1_cnt	<= (inwreb_16 == 4'd7) ? ((inw1_cnt == 4'd14) ? inw1_cnt : (inw2_cnt == 5'd5) ? inw1_cnt + 1'b1 : inw1_cnt) : inw1_cnt;
+		
+		default:		inw1_cnt	<= inw1_cnt;
+	endcase
+end
+
+always @(posedge clk) begin//inw2_cnt
+	case(next_state)
+		IDLE,
+		CONV_LOOP:		inw2_cnt	<= 5'b0;
+		CONV1,
+		CONV2,
+		CONV3:			inw2_cnt	<= jump_mac ? ((tn_cnt == tn_reg) ? inw2_cnt : 5'd1) : ((inw2_cnt == tk_reg) ? ((inw1_cnt == tk_reg - 1'b1) ? inw2_cnt : 5'd1) : inw2_cnt + 1'b1);
+		
+		FC_TRANSFER:	inw2_cnt	<= 5'b0;
+		FC:				inw2_cnt	<= (inwreb_16 == 4'd7) ? ((inw1_cnt == 4'd14) ? inw2_cnt : ((inw2_cnt == 5'd5) ? 5'd1 : inw2_cnt + 1'b1)) : inw2_cnt;
+		
+		default:		inw2_cnt	<= inw2_cnt;
+	endcase
+end
+
+always @(posedge clk) begin//psum_cnt
+	case(next_state)
+		IDLE,
+		CONV_LOOP:		psum_cnt	<= 5'b0;
+		CONV1,
+		CONV2,
+		CONV3,
+		CONV_HOLD:		psum_cnt	<= ((psum_type_reg == 1'b0) | (psum_cnt == `CONV_C)) ? psum_cnt : psum_cnt + 1'b1;
+		
+		FC:				psum_cnt	<= ((psum_type_reg == 1'b0) | (psum_cnt == `CONV_C)) ? psum_cnt : psum_cnt + 1'b1;
+		
+		default:		psum_cnt	<= psum_cnt;
+	endcase
+end
+
+always @(posedge clk) begin//out_cnt
+	case(next_state)
+		IDLE,
+		CONV_LOOP:		out_cnt		<= 5'b0;
+		CONV_TRANSFER,
+		CONV1,
+		CONV2,
+		CONV3,
+		CONV_HOLD:		out_cnt		<= ((out_cnt == `CONV_C) | ((pooling_type_reg[0] | pooling_type_reg[1]) & (out_cnt == pool_tc_reg)) | ((loop_R_cnt == 1'b1) & (loop_C_cnt == 1'b1) & (tm_cnt == 1'b1))) ? out_cnt : out_cnt + 1'b1;
+		CONV_LAST:		out_cnt		<= ((out_cnt == `CONV_C) | ((pooling_type_reg[0] | pooling_type_reg[1]) & (out_cnt == pool_tc_reg))) ? out_cnt : out_cnt + 1'b1;
+		
+		POOL_LOOP:		out_cnt		<= 5'b0;
+		POOL_TRANSFER:	out_cnt		<= ((out_cnt == pool_tc_reg) | ((tn_cnt == 1'b0) & (loop_R_cnt == 1'b1) & (loop_C_cnt == 1'b1))) ? out_cnt : out_cnt + 1'b1;
+		POOL_LAST:		out_cnt		<= (out_cnt == pool_tc_reg) ? out_cnt : out_cnt + 1'b1;
+		
+		FC_LAST:		out_cnt		<= (out_cnt == `CONV_C) ? out_cnt : out_cnt + 1'b1;
+		
+		default:		out_cnt		<= out_cnt;
+	endcase
+end
+//****************************************************************************************************
+
+//indata
+//****************************************************************************************************
+always @(posedge clk) begin//indata_en
+	case(next_state)
+		CONV_TRANSFER:	indata_en	<= 1'b1;
+		CONV1,
+		CONV2,
+		CONV3:			indata_en	<= ((indata_cnt == tiling_col_reg) & (~jump_mac | (tn_cnt == tn_reg - 1'b1) | (tn_cnt == tn_reg))) ? 1'b0 : 1'b1;
+		
+		POOL_TRANSFER:	indata_en	<= 1'b1;
+		
+		FC_TRANSFER:	indata_en	<= 1'b1;
+		
+		default:		indata_en	<= 1'b0;
+	endcase
+end
+always @(*) begin
+	indata_en_BRAM		= indata_en | indata_en_reg | indata_en_reg_reg;
+end
+
+always @(posedge clk) begin//indata_addr_start
+	case(next_state)
+		IDLE:			indata_addr_start	<= `INBUF_ADDRB_WIDTH 'b0;																																												//  tiling_col_reg - tk_reg + 1'd1 always equal to 4
+		//CONV_LOOP:		indata_addr_start	<= (tm_cnt == tm_reg) ? ((loop_C_cnt == loop_C_reg) ? ((conv_type == 2'b01) ? indata_addr_start + tiling_col_reg - remain_reg[1:0] : indata_addr_start + tk_reg) : ((conv_type == 2'b01) ? indata_addr_start + 3'd4 : indata_addr_start + (conv_stride_reg ? 2'd1 : 2'd2))) : indata_addr_start;
+		CONV_LOOP:		indata_addr_start	<= (tm_cnt == tm_reg) ? ((loop_C_cnt == loop_C_reg) ? ((conv_type == 2'b01) ? indata_addr_start + tiling_col_reg - remain_reg[1:0] : indata_addr_start + tk_reg + ((tk_reg == 3'd1) & (conv_stride == 1'b0))) : ((conv_type == 2'b01) ? indata_addr_start + 3'd4 : indata_addr_start + (conv_stride_reg ? 2'd1 : 2'd2))) : indata_addr_start;
+		
+		POOL_LOOP:		indata_addr_start	<= (loop_C_cnt == 1'b0) ? indata_addr_start : indata_addr_start + tiling_col_reg - 1'b1;
+		default:		indata_addr_start	<= indata_addr_start;
+	endcase
+end
+
+always @(posedge clk) begin//tiling_indata_addr_offset
+	case(next_state)
+		IDLE:			tiling_indata_addr_offset		<= `INBUF_ADDRB_WIDTH 'hF_FFFF;
+		CONV_TRANSFER:	tiling_indata_addr_offset		<= indata_addr_start;
+		CONV1,
+		CONV2,
+		CONV3:			tiling_indata_addr_offset		<= ((indata_cnt == tiling_col_reg) & indata_en) ? tiling_indata_addr_offset + indata_addr_offset_reg : tiling_indata_addr_offset;
+		default:		tiling_indata_addr_offset		<= tiling_indata_addr_offset;
+	endcase
+end
+
+always @(posedge clk) begin//indata_addr
+	case(next_state)
+		IDLE:			indata_addr			<=`INBUF_ADDRB_WIDTH 'b0;
+		//CONV_LOOP:		indata_addr			<= indata_addr_start;
+		CONV_TRANSFER:	indata_addr			<= indata_en ? indata_addr + 1'b1 : indata_addr_start;
+		CONV1,
+		CONV2,
+		CONV3:			indata_addr			<= indata_en ? ((indata_cnt == tiling_col_reg) ? tiling_indata_addr_offset + indata_addr_offset_reg : indata_addr + 1'b1) : indata_addr;
+		
+		POOL_TRANSFER:	indata_addr			<= indata_en ? indata_addr + 1'b1 : indata_addr_start;
+		
+		FC_TRANSFER:	indata_addr			<= indata_en ? indata_addr + 1'b1 : indata_addr;
+		
+		default:		indata_addr			<= indata_addr;
+	endcase
+end
+//****************************************************************************************************
+
+//weight
+//****************************************************************************************************
+always @(posedge clk) begin//inweight_en
+	case(next_state)
+		IDLE:		inweight_en		<= 1'b0;
+		CONV1,
+		CONV2,
+		CONV3:		inweight_en		<= 1'b1;
+		
+		FC:			inweight_en		<= 1'b1;
+		
+		default:	inweight_en		<= 1'b0;
+	endcase
+end
+
+always @(posedge clk) begin//inwreb_16
+	case(next_state)
+		IDLE:		inwreb_16		<= 4'b0;
+		CONV_LOOP:	inwreb_16		<= (tm_cnt == tm_reg) ? 4'd0 : inwreb_16;
+		CONV1:		inwreb_16		<= (inwreb_16 == `NUM_ADDR_WBUF) ? 4'd1 : inwreb_16 + 1'b1;		// 4 channel
+		CONV2:		inwreb_16		<= inwreb_16[1] ? 4'd1 : inwreb_16 + 1'b1;						//16 channel
+		CONV3:		inwreb_16		<= 4'b1;														//32 channel
+		
+		FC_TRANSFER:inwreb_16		<= 4'd7;
+		FC:			inwreb_16		<= (inwreb_16 == 4'd7) ? (jump_mac ? 4'd0 : 4'd1) : inwreb_16 + 1'b1;
+		
+		default:	inwreb_16		<= inwreb_16;
+	endcase
+end
+
+always @(posedge clk) begin//inweight_addr
+	case(next_state)
+		IDLE:		inweight_addr	<= `WBUF_ADDRB_WIDTH 'b0;
+		CONV_LOOP:	inweight_addr	<= (tm_cnt == tm_reg) ? `WBUF_ADDRB_WIDTH 'b0 : inweight_addr;
+		CONV1:		inweight_addr	<= (inwreb_16 == `NUM_ADDR_WBUF) ? inweight_addr + 1'b1 : inweight_addr;
+		CONV2:		inweight_addr	<= inwreb_16[1] ? inweight_addr + 1'b1 : inweight_addr;
+		CONV3:		inweight_addr	<= inweight_en ? inweight_addr + 1'b1 : inweight_addr;
+		
+		FC_TRANSFER:inweight_addr	<= `WBUF_ADDRB_WIDTH 'b0;
+		FC:			inweight_addr	<= (((inw1_cnt == 4'd0) & (inw2_cnt == 5'd0)) | jump_mac) ? inweight_addr : inweight_addr + 1'b1;
+		FC_HOLD:	inweight_addr	<= `WBUF_ADDRB_WIDTH 'b0;
+		default:	inweight_addr	<= inweight_addr;
+	endcase
+end
+//****************************************************************************************************
+
+//bias
+//****************************************************************************************************
+always @(posedge clk) begin//inbias_en
+	case(next_state)
+		IDLE:			inbias_en	<= 1'b0;
+		CONV_BIAS,
+		CONV_REGULAR:	inbias_en	<= (state == next_state) ? 1'b0 : 1'b1;
+		default:		inbias_en	<= 1'b0;
+	endcase
+end
+
+always @(posedge clk) begin//inbias_addr
+	case(next_state)
+		IDLE:			inbias_addr		<= bias_addr_offset_reg - 1'b1;
+		CONV_LOOP:		inbias_addr		<= ((tm_cnt == tm_reg) | (tm_cnt == 1'b0)) ? bias_addr_offset_reg - 1'b1 : inbias_addr;
+		CONV_BIAS,
+		CONV_REGULAR:	inbias_addr		<= (state == next_state) ? inbias_addr : inbias_addr + 1'b1;
+		default:		inbias_addr		<= inbias_addr;
+	endcase
+end
+//****************************************************************************************************
+
+//psum
+//****************************************************************************************************
+always @(posedge clk) begin//psum_en
+	case(next_state)
+		IDLE:			psum_en		<= 1'b0;
+		CONV1,
+		CONV2,
+		CONV3,
+		CONV_HOLD:		psum_en		<= ((psum_type_reg == 1'b0) | (psum_cnt == `CONV_C)) ? 1'b0 : 1'b1;
+		
+		FC:				psum_en		<= ((psum_type_reg == 1'b0) | (psum_cnt == `CONV_C)) ? 1'b0 : 1'b1;
+		
+		default:		psum_en		<= 1'b0;
+	endcase
+end
+always @(*) begin
+	psum_en_BRAM			= psum_en | psum_en_reg | psum_en_reg_reg;
+end
+
+always @(posedge clk) begin//psum_addr
+	case(next_state)
+		IDLE:			psum_addr	<= `PBUF_ADDRB_WIDTH 'hF_FFFF;
+		CONV1,
+		CONV2,
+		CONV3,
+		CONV_HOLD:		psum_addr	<= ((psum_cnt == `CONV_C) | (psum_type_reg == 1'b0)) ? psum_addr : psum_addr + 1'b1;
+		
+		FC:				psum_addr	<= ((psum_cnt == `CONV_C) | (psum_type_reg == 1'b0)) ? psum_addr : psum_addr + 1'b1;
+		
+		default:		psum_addr	<= psum_addr;
+	endcase
+end
+//****************************************************************************************************
+
+//outdata
+//****************************************************************************************************
+always @(posedge clk) begin//outdata_en
+	case(next_state)
+		IDLE:			outdata_en	<= 1'b0;
+		CONV_TRANSFER,
+		CONV1,
+		CONV2,
+		CONV3,
+		CONV_HOLD:		outdata_en	<= ((out_cnt == `CONV_C) | ((pooling_type_reg[0] | pooling_type_reg[1]) & (out_cnt == pool_tc_reg)) | ((loop_R_cnt == 1'b1) & (loop_C_cnt == 1'b1) & (tm_cnt == 1'b1))) ? 1'b0 : 1'b1;
+		CONV_LAST:		outdata_en	<= ((out_cnt == `CONV_C) | ((pooling_type_reg[0] | pooling_type_reg[1]) & (out_cnt == pool_tc_reg))) ? 1'b0 : 1'b1;
+		
+		POOL_TRANSFER:	outdata_en	<= ((out_cnt == pool_tc_reg) | ((tn_cnt == 1'b0) & (loop_R_cnt == 1'b1) & (loop_C_cnt == 1'b1))) ? 1'b0 : 1'b1;
+		POOL_LAST:		outdata_en	<= (out_cnt == pool_tc_reg) ? 1'b0 : 1'b1;
+		
+		FC_LAST:		outdata_en	<= (out_cnt == `CONV_C) ? 1'b0 : 1'b1;
+		
+		default:		outdata_en	<= 1'b0;
+	endcase
+end
+
+always @(posedge clk) begin//outdata_addr_start
+	case(next_state)
+		IDLE:			outdata_addr_start		<= `MAC_OUTDDRA_WIDTH 'b0;
+		CONV_LOOP:		outdata_addr_start		<= (tm_cnt == tm_reg) ? ((conv_type == 2'b00) ? outdata_addr_start + 1'b1 : ((pooling_type_reg == 2'b10) ? outdata_addr_start + 2'd2 : outdata_addr_start + tiling_col_reg - tk_reg + 1'b1)) : outdata_addr_start;
+		default:		outdata_addr_start		<= outdata_addr_start;
+	endcase
+end
+
+always @(posedge clk) begin//tiling_indata_addr_offset
+	case(next_state)
+		IDLE:			pooling_outdata_addr_offset		<= `MAC_OUTDDRA_WIDTH 'b0;
+		CONV_LOOP:		pooling_outdata_addr_offset		<= (tm_cnt == 1'b1) ? outdata_addr_start : pooling_outdata_addr_offset;
+		CONV_TRANSFER,
+		CONV1,
+		CONV_LAST:		pooling_outdata_addr_offset		<= (((pooling_type_reg == 2'b10) & (out_cnt[0] == 1'b1)) | ((pooling_type_reg != 2'b10) & (out_cnt[1:0] == 2'b11))) ? pooling_outdata_addr_offset + outdata_addr_offset_reg : pooling_outdata_addr_offset;
+		
+		default:		pooling_outdata_addr_offset		<= pooling_outdata_addr_offset;
+	endcase
+end
+
+always @(posedge clk) begin//outdata_addr
+	case(next_state)
+		IDLE:			outdata_addr		<= `MAC_OUTDDRA_WIDTH 'b0;
+		CONV_LOOP:		outdata_addr		<= out_type_reg ? ((tm_cnt == 1'b1) ? outdata_addr_start : outdata_addr) : outdata_addr;
+		//CONV_LOOP:		outdata_addr		<= out_type_reg ? ((tm_cnt == 1'b1) ? outdata_addr_start : outdata_addr) : (((loop_R_cnt == 1'b1) & (loop_C_cnt == 1'b1) & (tm_cnt == 1'b1)) ? outdata_addr_start : outdata_addr);
+		//CONV_TRANSFER,
+		//CONV_HOLD:		outdata_addr		<= ((out_cnt == `CONV_C) | ((tm_cnt == 1'b1) & (LOOP_C_cnt == 1'b1) & (LOOP_R_cnt == 1'b1))) ? outdata_addr : (out_type_reg ? ((conv_type == 2'b01) ? ((((pooling_type_reg == 2'b10) & (out_cnt[0] == 1'b0)) | ((pooling_type_reg != 2'b10) & (out_cnt[1:0] == 2'b00))) ? pooling_outdata_addr_offset : outdata_addr + 1'b1) : outdata_addr + outdata_addr_offset_reg) : outdata_addr + 1'b1);
+		CONV_TRANSFER,
+		CONV_HOLD,
+		CONV_PSUM,
+		CONV_BIAS,
+		CONV_REGULAR,
+		CONV_ACTFUN,
+		CONV_ORMAP,
+		CONV_LAST:		outdata_addr		<= outdata_en ? (out_type_reg ? ((conv_type == 2'b01) ? ((((pooling_type_reg == 2'b10) & (out_cnt[0] == 1'b0)) | ((pooling_type_reg != 2'b10) & (out_cnt[1:0] == 2'b00))) ? pooling_outdata_addr_offset : outdata_addr + 1'b1) : outdata_addr + outdata_addr_offset_reg) : outdata_addr + 1'b1) : outdata_addr;
+		CONV1:			outdata_addr		<= outdata_en ? (out_type_reg ? ((((pooling_type_reg == 2'b10) & (out_cnt[0] == 1'b0)) | ((pooling_type_reg != 2'b10) & (out_cnt[1:0] == 2'b00))) ? pooling_outdata_addr_offset : outdata_addr + 1'b1) : outdata_addr + 1'b1) : outdata_addr;
+		CONV2:			outdata_addr		<= outdata_en ? (out_type_reg ? outdata_addr + outdata_addr_offset_reg : outdata_addr + 1'b1) : outdata_addr;
+		CONV3:			outdata_addr		<= outdata_en ? (out_type_reg ? outdata_addr + outdata_addr_offset_reg : outdata_addr + 1'b1) : outdata_addr;
+		
+		//POOL_TRANSFER:	outdata_addr		<= ((out_cnt == pool_tc_reg) | ((tn_cnt == 1'b0) & (loop_R_cnt == 1'b1) & (loop_C_cnt == 1'b1))) ? outdata_addr : outdata_addr + 1'b1;
+		POOL_LOOP:		outdata_addr		<= ((loop_C_cnt == 1'b1) & outdata_addr[0]) ? outdata_addr + 1'b1 : outdata_addr;
+		POOL_TRANSFER,
+		POOL,
+		POOL_LAST:		outdata_addr		<= outdata_en ? outdata_addr + 1'b1 : outdata_addr;
+		
+		FC_LAST:		outdata_addr		<= (out_cnt == `CONV_C) ? outdata_addr : outdata_addr + 1'b1;
+		
+		default:		outdata_addr		<= outdata_addr;
+	endcase
+end
+//****************************************************************************************************
+
+//sel & shift_dir
+//****************************************************************************************************
+always @(posedge clk) begin//sel
+	case(next_state)
+		IDLE:			sel		<= 8'b00000000;
+		
+		CONV_LOOP,
+		CONV_TRANSFER:	sel		<= 8'b00000000;
+		CONV1,
+		CONV2,
+		CONV3:			sel		<= 8'b00010101;
+		CONV_PSUM:		sel		<= 8'b01011011;
+		CONV_BIAS:		sel		<= 8'b00011011;
+		CONV_REGULAR:	sel		<= 8'b00000101;
+		CONV_ACTFUN:	sel		<= act_type_reg[2] ? 8'b00111101 : (act_type_reg[1] ? (act_type_reg[0] ? 8'b00011101 : 8'b01000101) : 8'b10000101);
+		CONV_ORMAP:		sel		<= 8'b00010000;
+		CONV_LAST:		sel		<= 8'b00000000;
+		
+		POOL_LOOP:		sel		<= 8'b00000000;
+		POOL_TRANSFER:	sel		<= 8'b00000000;
+		POOL:			sel		<= pooling_type[1] ? 8'b00111011 : 8'b10011011;
+		POOL_ORMAP:		sel		<= 8'b00010000;
+		
+		FC_TRANSFER:	sel		<= 8'b01010000;
+		FC:				sel		<= 8'b00010101;
+		FC_HOLD:		sel		<= 8'b00010000;
+		FC_PSUM:		sel		<= 8'b01011011;
+		FC_ORMAP:		sel		<= 8'b00010000;
+		FC_LAST:		sel		<= 8'b00000000;
+		
+		default:		sel		<= sel;
+	endcase
+end
+
+always @(posedge clk) begin//shift_dir
+	case(state)
+		IDLE:			shift_dir	<= 2'b0;
+		CONV1:			shift_dir	<= (inw2_cnt == tk_reg) ? ((inw1_cnt == tk_reg - 1'b1) ? 2'b00 : 2'b11) : (inw1_cnt[0] ? 2'b10 : 2'b01);
+		CONV2:			shift_dir	<= (tk_reg == 3'd1) ? 2'b00 : ((inw2_cnt == tk_reg) ? ((inw1_cnt == tk_reg - 1'b1) ? 2'b00 : 2'b11) : (inw1_cnt[0] ? 2'b10 : 2'b01));
+		CONV3:			shift_dir	<= (inw2_cnt == tk_reg) ? ((inw1_cnt == tk_reg - 1'b1) ? 2'b00 : 2'b11) : (inw1_cnt[0] ? 2'b10 : 2'b01);
+		
+		POOL:			shift_dir	<= (pooling_type_reg == 2'b11) ? ((clk_cnt >= 4'd6) ? 2'b11 : 2'b01) : (((clk_cnt == 4'd0) | (clk_cnt == 4'd1) | (clk_cnt == 4'd2)) ? 2'b01 : 2'b11);
+		
+		FC:				shift_dir	<= (inwreb_16 == 4'd7) ? ((inw2_cnt == 1'b0) ? 2'b00 : ((inw2_cnt == 4'd5) ? ((inw1_cnt == 4'd13) ? 2'b00 : 2'b11) : (inw1_cnt[0] ? 2'b10 : 2'b01))) : 2'b00;
+		
+		default:		shift_dir	<= 2'b0;
+	endcase
+end
+//****************************************************************************************************
+
+//FSM
+//****************************************************************************************************
+always @(posedge clk) begin
+	if(rst) begin
+		state		<= IDLE;
+	end
+	else begin
+		state		<= next_state;
+	end
+end
+
+always @(*) begin
+	case(state)
+		IDLE:			next_state	<= conv_start_reg ? ((net_type_reg == 2'b00) ? FC_TRANSFER : ((net_type_reg == 2'b01) ? CONV_LOOP : ((net_type_reg == 2'b10) ? POOL_LOOP : IDLE))) : IDLE;
+		
+		/***************CONV*****************/
+		CONV_LOOP:		next_state	<= (loop_R_cnt == loop_R_reg + 1'b1) ? CONV_LAST : CONV_TRANSFER;
+		CONV_TRANSFER:	next_state	<= (indata_cnt == tiling_col_reg) ? ((conv_type == 2'b01) ? CONV1 : ((conv_type == 2'b00) ? CONV2 : CONV3)) : state;
+		CONV1,
+		CONV2,
+		CONV3:			next_state	<= (jump_mac & (tn_cnt == tn_reg)) ? CONV_HOLD : state;
+		CONV_HOLD:		next_state	<= (clk_cnt[1] == 1'b0 | keep_inout) ? state : (psum_type_reg ? CONV_PSUM : (bias_type_reg ? CONV_BIAS : ((act_type_reg[0] | act_type_reg[1] | act_type_reg[2]) ? CONV_ACTFUN : CONV_ORMAP)));
+		CONV_PSUM:		next_state	<= (clk_cnt[1] == 1'b0) ? state : (bias_type_reg ? CONV_BIAS : ((act_type_reg[0] | act_type_reg[1] | act_type_reg[2]) ? CONV_ACTFUN : CONV_ORMAP));
+		CONV_BIAS:		next_state	<= (clk_cnt[1] == 1'b0) ? state : (regular_type_reg ? CONV_REGULAR : ((act_type_reg[0] | act_type_reg[1] | act_type_reg[2]) ? CONV_ACTFUN : CONV_ORMAP));
+		CONV_REGULAR:	next_state	<= (clk_cnt[1:0] == 2'b11) ? ((act_type_reg[0] | act_type_reg[1] | act_type_reg[2]) ? CONV_ACTFUN : CONV_ORMAP) : state;
+		CONV_ACTFUN:	next_state	<= (clk_cnt[1:0] == 2'b11) ? CONV_ORMAP : state;
+		CONV_ORMAP:		next_state	<= (pooling_type_reg == 2'b00) ? CONV_LOOP : ((pooling_type_reg == 2'b11) ? ((clk_cnt == 4'd12) ? CONV_LOOP : POOL) : ((clk_cnt == 4'd6) ? CONV_LOOP : POOL));
+		CONV_LAST:		next_state	<= (((pooling_type_reg[0] | pooling_type_reg[1]) & (out_cnt == pool_tc_reg)) | (out_cnt == `CONV_C)) ? FINISH : state;
+		/************************************/
+		
+		/************ONLYPOOLING*************/
+		POOL_LOOP:		next_state	<= (tn_cnt == tn_reg) ? POOL_LAST : POOL_TRANSFER;
+		POOL_TRANSFER:	next_state	<= (indata_cnt == tiling_col_reg) ? POOL : state;
+		POOL:			next_state	<= ((clk_cnt == 4'd2) | (clk_cnt == 4'd5) | (clk_cnt == 4'd8) | (clk_cnt == 4'd11)) ? ((net_type_reg == 2'b01) ? CONV_ORMAP : POOL_ORMAP) : state;
+		POOL_ORMAP:		next_state	<= (pooling_type_reg == 2'b11) ? ((clk_cnt == 4'd12) ? POOL_LOOP : POOL) : ((clk_cnt == 4'd6) ? POOL_LOOP : POOL);
+		POOL_LAST:		next_state	<= (out_cnt == pool_tc_reg) ? FINISH : state;
+		/************************************/
+		
+		/****************FC******************/
+		FC_TRANSFER:	next_state	<= (indata_cnt == tiling_col_reg) ? FC : state;
+		FC:				next_state	<= (inwreb_16 == 4'd7) ? ((inw2_cnt == 5'd0) ? state : (jump_mac ? FC_HOLD : state)) : state;
+		FC_HOLD:		next_state	<= (tn_cnt == tn_reg) ? (psum_type_reg ? FC_PSUM : FC_ORMAP) : (conv_start_reg ? FC_TRANSFER : state);
+		FC_PSUM:		next_state	<= (clk_cnt[1:0] == 2'b11) ? FC_ORMAP :state;
+		FC_ORMAP:		next_state	<= clk_cnt[0] ? FC_LAST : state;
+		FC_LAST:		next_state	<= (out_cnt == `CONV_C) ? FINISH : state;
+		/************************************/
+		
+		default:		next_state	<= IDLE;
+	endcase
+end
+//****************************************************************************************************
+
+endmodule
