@@ -1,0 +1,297 @@
+//`include "E:/code/vivado2018/MAC_20.1.6/MAC_DSP_6.10/cnn_parameter.v"
+`timescale 1ns/100ps
+
+module top_testbench();
+//****************************************************************************************************
+`define HALFCLK			5
+`define conv2fc			1		// such as AlexNet layer 6
+`define NET_TYPE		1		//01: convolution , 0: full connection; 10: only pooling  
+`define TM				512		//output channel, for timing count
+`define Tn				512		//input channel
+`define TK				5		//filter, TK<=11
+`define STRIDE			1		//1 <= STRIDE <= 4
+//`define POOLING_STRIDE	1	//1 <= STRIDE <= 4
+`define TILING_COL		5		//1 <= STRIDE <= 4
+`define INADDROFFSET	112	//Tl*n
+`define OUTADDROFFSET	13
+`define BIASADDROFFSET	192		//<=255
+`define LOOP_R 			1
+`define LOOP_C			4		// output feature map width, 4*LOOP_C
+`define pool_Tc			7
+
+`define PSUM_TYPE		1		//0:none, 1:partial sum, 
+`define RGLZ_TYPE		1		//0:none, 1:regularization. when RGLZ_TYPE equal to 1, the BIAS_TYPE must be 1 . But BIAS_TYPE equal to 1, the RGLZ_TYPE can equal to 0.
+`define ACT_TYPE		0		//activation function 0:none, 1:ReLU, 2:LeakyReLU, 3:sigmoid. 4.relu6
+`define OUT_TYPE		1		// 0:partial sum,  1:output feature map
+`define BIAS_TYPE		1		//0:none, 1:bias,
+`define POOLING			0
+//3'b000:0 no pooling 
+//3'b001:1 2*2 mean pooling, stride=1
+//3'b010:2 2*2 max pooling, stride=1
+//3'b101:5 2*2 mean pooling, stride=2
+//3'b110:6 2*2 max pooling, stride=2
+//3'b111:7 3*3 max pooling, stride=2
+`define DATA_SHIFT		0		//layer 1  
+`define REGULAR_SHIFT	13		//layer 1
+`define QVAL			6
+`define	POOL_R			14
+`define	POOL_C			16
+//****************************************************************************************************
+
+reg	clk;
+reg	rst;
+reg	start;
+
+//****************************************************************************************************
+reg		[1:0]							net_type;
+reg										conv_stride;
+reg										bias_type;
+reg										psum_type;
+reg										regular_type;
+reg		[2:0]							act_type;
+reg		[2:0]							pooling_type;
+reg										out_type;
+reg		[4:0]							qval;
+
+reg		[`SHIFT_WIDTH - 1 : 0]			conv_shift_num;
+reg		[`SHIFT_WIDTH - 1 : 0]			regular_shift_num;
+
+reg		[2:0]							tk;
+reg		[`TILING_Tn_WIDTH - 1 : 0]		tn;
+reg		[`TILING_tm_WIDTH - 1 : 0]		tm;
+reg		[`INBUF_Tl_WIDTH - 1 : 0]		tl;
+reg		[`TILING_COL_WIDTH - 1 : 0]		tiling_col;
+reg		[3:0]							pool_tc;
+reg		[`TILING_LOOP_R_WIDTH - 1 : 0]	loop_R;
+reg		[`TILING_LOOP_C_WIDTH - 1 : 0]	loop_C;
+reg		[3:0]							pool_R;
+reg		[4:0]							pool_C;
+
+reg		[`INBUF_ADDRB_WIDTH - 1 : 0]	indata_addr_offset;
+reg		[`BIAS_OFFSET_WIDTH - 1 : 0]	bias_addr_offset;
+reg		[`MAC_OUTDDRA_WIDTH - 1 : 0]	outdata_addr_offset;
+//****************************************************************************************************
+
+//output signal
+//****************************************************************************************************
+wire														finish;
+wire														indata_en_BRAM;
+wire														weight_bias_en_BRAM;
+wire														psum_en_BRAM;
+wire	[`INBUF_RAM_ROW * `INBUF_DATAB_WIDTH - 1 : 0] 		in_data_reg_reg;
+reg		[`INBUF_RAM_ROW * `INBUF_DATAB_WIDTH - 1 : 0] 		in_data_reg;
+reg		[`INBUF_RAM_ROW * `INBUF_DATAB_WIDTH - 1 : 0] 		in_data;
+wire	[`DATA_WIDTH - 1 : 0]								indata_tmp;
+wire														outdata_en;
+wire	[`WBUF_DATAB_WIDTH - 1 : 0] 						weight0_reg_reg;
+reg		[`WBUF_DATAB_WIDTH - 1 : 0]							weight0, weight1_reg;
+wire	[`WBUF_DATAB_WIDTH - 1 : 0] 						weight1;
+wire	[`WBUF_DATAB_WIDTH - 1 : 0] 						weight2;
+wire	[`WBUF_DATAB_WIDTH - 1 : 0] 						weight3;
+reg		[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH -  1 : 0] 		psum_data0;
+wire	[`PBUF_DATAB_WIDTH - 1 : 0]							psum_data0_[13:0];
+reg		[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH -  1 : 0] 		psum_data0_reg;
+wire	[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH -  1 : 0] 		psum_data0_reg_reg;
+wire	[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH - 1 : 0] 		psum_data1;
+wire	[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH - 1 : 0] 		psum_data2;
+wire	[`PBUF_RAM_ROW * `PBUF_DATAB_WIDTH - 1 : 0] 		psum_data3;
+wire	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 : 0] 		out_data0;
+wire	[`DATA_WIDTH - 1 : 0]								out_data0_[13:0];
+wire	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 : 0] 		out_data1;
+wire	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 : 0] 		out_data2;
+wire	[`WR_DEPTH_ROW * `OUTBUF_DATAA_WIDTH - 1 : 0] 		out_data3;
+
+wire	[`INBUF_ADDRB_WIDTH - 1 : 0]						indata_addr;
+wire	[`WBUF_ADDRB_WIDTH - 1 : 0]							weight_bias_addr;
+wire	[`PBUF_ADDRB_WIDTH - 1 : 0]							psum_addr;
+wire	[`MAC_OUTDDRA_WIDTH - 1 : 0]						outdata_addr;
+//****************************************************************************************************
+
+//input value
+//****************************************************************************************************
+//assign	psum_data1	= {14{16'd153}};
+//assign  in_data ={{16'd20},{16'd19},{16'd18},{16'd17},{16'd16},{16'd15},{16'd14},{16'd13},{16'd12},{16'd11},{16'd10},{16'd9},{16'd8},{16'd7},{16'd6},{16'd5},{16'd4},{16'd3},{16'd2},{16'd1}};
+assign	in_data_reg_reg		= {20{indata_tmp}};
+
+//input
+BRAM_indata BRAM_indata_1(              //indata BRAM
+	.clka(clk),
+	.ena(),
+	.wea(),
+	.addra(),
+	.dina(),
+	.clkb(clk),
+	.enb(indata_en_BRAM),
+	.addrb(indata_addr),
+	.doutb(indata_tmp)
+);
+
+//weight
+BRAM_weight BRAM_weight_1(             //weight BRAM
+	.clka(clk),
+	.ena(),
+	.wea(),
+	.addra(),
+	.dina(),
+	.clkb(clk),
+	.enb(weight_bias_en_BRAM),
+	.addrb(weight_bias_addr),
+	.doutb(weight0_reg_reg)
+);
+
+BRAM_PSUM BRAM_PSUM_1(                 //PSUM BRAM
+	.clka(clk),
+	.ena(),
+	.wea(),
+	.addra(),
+	.dina(),
+	.clkb(clk),
+	.enb(psum_en_BRAM),
+	.addrb(psum_addr),
+	.doutb(psum_data0_reg_reg)
+);
+
+always @(*) begin
+	in_data			<= in_data_reg_reg;
+	weight0			<= weight0_reg_reg;
+	psum_data0		<= psum_data0_reg_reg;
+end
+
+wire		[`DATA_WIDTH - 1 : 0]								weight0_[31:0];
+genvar i;
+generate
+	for(i = 0; i < 32; i = i + 1) begin
+		assign	weight0_[i]		= weight0[(i + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+	end
+	for(i = 0; i < 14; i = i + 1) begin
+		assign	psum_data0_[i]	= psum_data0[(i + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+		assign	out_data0_[i]	= out_data0[(i + 1) * `DATA_WIDTH - 1 -: `DATA_WIDTH];
+	end
+endgenerate
+//****************************************************************************************************
+
+//****************************************************************************************************
+always #(`HALFCLK) clk	<= ~clk;
+initial begin
+	clk					= 1'b0;
+	rst					= 1'b1;
+	
+	#(`HALFCLK * 10)
+	rst					= 1'b0;
+	start				= 1'b0;
+	
+	#(`HALFCLK * 10)
+	net_type			= `NET_TYPE;
+	conv_stride			= `STRIDE;
+	bias_type			= `BIAS_TYPE;
+	psum_type			= `PSUM_TYPE;
+	regular_type		= `RGLZ_TYPE;
+	act_type			= `ACT_TYPE;
+	pooling_type		= `POOLING;
+	out_type			= `OUT_TYPE;
+	qval				= `QVAL;
+	
+	conv_shift_num		= `DATA_SHIFT;
+	regular_shift_num	= `REGULAR_SHIFT;
+	
+	tk					= `TK;
+	tn					= `Tn;
+	tm					= `TM;
+	tl					= `INADDROFFSET/`LOOP_R;
+	tiling_col			= `TILING_COL;
+	pool_tc				= `pool_Tc;
+	loop_R				= `LOOP_R;
+	loop_C				= `LOOP_C;
+	pool_R				= `POOL_R;
+	pool_C				= `POOL_C;
+	
+	indata_addr_offset	= `INADDROFFSET;
+	bias_addr_offset	= `BIASADDROFFSET;
+	outdata_addr_offset	= `OUTADDROFFSET;
+	
+	#(`HALFCLK * 2)
+	start				= 1'b1;
+	
+	#(`HALFCLK * 2)
+	start				= 1'b0;
+	
+	if(net_type == 0) begin//fc
+		repeat(tn - 1) begin
+			wait(finish);
+			#(`HALFCLK * 10)	start = 1;
+			#(`HALFCLK * 2)	start = 0;
+		end
+		wait(finish);
+	end
+	
+	wait(finish);
+	
+	#(`HALFCLK * 20)
+	$stop;
+end
+//****************************************************************************************************
+
+//****************************************************************************************************
+convcore_top convcore_top_ins(                //convcore_top
+	.clk(clk),
+	.rst(rst),
+	.conv_start(start),
+	.conv_finish(finish),
+	
+	.net_type(net_type),
+	.conv_stride(conv_stride),
+	.bias_type(bias_type),
+	.psum_type(psum_type),
+	.regular_type(regular_type),
+	.act_type(act_type),
+	.pooling_type(pooling_type),
+	.out_type(out_type),
+	.qval(qval),
+	
+	.conv_shift_num(conv_shift_num),
+	.regular_shift_num(regular_shift_num),
+	
+	.tk(tk),
+	.tn(tn),
+	.tm(tm),
+	.tl(tl),
+	.tiling_col(tiling_col),
+	.pool_tc(pool_tc),
+	.loop_R(loop_R),
+	.loop_C(loop_C),
+	.pool_R(pool_R),
+	
+	.indata_addr_offset(indata_addr_offset),
+	.in_data(in_data),
+	.indata_en_BRAM(indata_en_BRAM),
+	.indata_addr(indata_addr),
+	
+	.bias_addr_offset(bias_addr_offset),
+	.weight0(weight0),
+	.weight_bias_en_BRAM(weight_bias_en_BRAM),
+	.weight_bias_addr(weight_bias_addr),
+	
+	.psum_data0(psum_data0),
+	.psum_en_BRAM(psum_en_BRAM),
+	.psum_addr(psum_addr),
+	
+	.psum_data1(psum_data1),
+	.weight1(weight1),
+	.out_data1(out_data1),
+	
+	.psum_data2(psum_data2),
+	.weight2(weight2),
+	.out_data2(out_data2),
+	
+	.psum_data3(psum_data3),
+	.weight3(weight3),
+	.out_data3(out_data3),
+	
+	.outdata_addr_offset(outdata_addr_offset),
+	.outdata_en_BRAM(outdata_en),
+	.outdata_addr_BRAM(outdata_addr),
+	.out_data0(out_data0)
+);
+//****************************************************************************************************
+
+endmodule
